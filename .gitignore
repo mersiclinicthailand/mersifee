@@ -1,0 +1,11 @@
+node_modules/
+dist/
+verify/build/
+tsconfig.tsbuildinfo
+.DS_Store
+*.local
+
+# ห้าม commit ข้อมูลจริงของแพทย์ (เลขบัตรประชาชน เลขบัญชี)
+supabase/.temp/
+supabase/seed_*
+**/fixture_*.json
