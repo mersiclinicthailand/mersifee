@@ -65,6 +65,20 @@ export interface MailTargets {
   pid: string; branch: string; ym: string; status: string; rows: MailRow[];
 }
 
+export interface PoolRow {
+  licNo: string; name: string; nick: string;
+  bank: string; bankAcc: string;
+  email: string | null; contact: string;
+  source: string; payeeType: string; payeeName: string;
+}
+export interface PoolSearch {
+  /** จำนวนที่ยังไม่ได้ขึ้นทะเบียนทั้งคลัง (ไม่สนคำค้น) */
+  pool: number;
+  /** จำนวนที่ตรงคำค้น — อาจมากกว่า rows.length เพราะจำกัดจำนวนแถวที่ส่งกลับ */
+  found: number;
+  rows: PoolRow[];
+}
+
 export interface SignView {
   licNo: string; name: string; branch: string; branchTh: string; ym: string;
   gross: number; tax: number; net: number;
@@ -189,6 +203,21 @@ export const api = {
     if (error) throw new Error(error.message);
     dropCache();
   },
+  /* --------------------- คลังรายชื่อแพทย์ (doctor_pool) ---------------------
+   * คลังนี้ย้ายมาจากระบบเดิมพร้อมกัน แต่ไม่เคยมีหน้าจอให้ใช้
+   * ค้นหาและขึ้นทะเบียนผ่าน RPC เท่านั้น เพื่อให้มี audit ทุกครั้งที่เขียนทะเบียน
+   */
+  poolSearch: (q: string, limit = 50) =>
+    rpc<PoolSearch>('fee_pool_search', { p_q: q, p_limit: limit }),
+
+  async poolPromote(licNos: string[]) {
+    const r = await rpc<{ added: number; skipped: number; missing: number }>(
+      'fee_pool_promote', { p_lic_nos: licNos },
+    );
+    dropCache();
+    return r;
+  },
+
   async listRates() {
     const { data, error } = await supabase.from('rate').select('*').order('lic_no').order('eff_from');
     if (error) throw new Error(error.message);

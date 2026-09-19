@@ -122,7 +122,7 @@ Deno.serve(async (req) => {
   }
 
   const { data: docs } = await admin.schema('fee').from('doctor')
-    .select('lic_no, full_name, nick_name, contact').in('lic_no', lics);
+    .select('lic_no, full_name, nick_name, contact, email').in('lic_no', lics);
 
   const { data: branchRow } = await admin.from('branches')
     .select('name_th').eq('code', branch).maybeSingle();
@@ -132,7 +132,8 @@ Deno.serve(async (req) => {
   const results: { licNo: string; ok: boolean; error?: string }[] = [];
 
   for (const d of (docs || [])) {
-    const email = String(d.contact || '').trim().toLowerCase();
+    // ทะเบียนมีช่อง email แยกแล้ว แต่ข้อมูลเก่าบางแถวยังเก็บอีเมลไว้ในช่องติดต่อ
+    const email = String(d.email || d.contact || '').trim().toLowerCase();
     const licNo = String(d.lic_no);
     const amt = lines[licNo];
 
