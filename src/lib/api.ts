@@ -1,0 +1,222 @@
+/* ============================================================================
+ * api.ts — ชั้นเรียกข้อมูล
+ * หลักการเดียวกับระบบเดิม แต่เร็วกว่ามาก:
+ *   · หนึ่งหน้าจอ = หนึ่งคำขอ (RPC ตัวเดียวคืนทุกอย่างที่หน้านั้นต้องใช้)
+ *   · แคชฝั่งเว็บผูกกับรอบ — สลับแท็บกลับมาที่เดิมไม่ยิงซ้ำ แก้ข้อมูลแล้วแคชหมดอายุทันที
+ * ==========================================================================*/
+import { supabase } from './supabase';
+import type { CalcCtx, ShiftRow, DoctorRow, RateRow, SignRow, AdjustRow, ProcDayRow } from './calc';
+
+export interface Me {
+  username: string; name: string; role: string; roleTh: string;
+  branches: string[]; allBranch: boolean; licNo: string | null;
+}
+export interface BranchInfo {
+  code: string; nameTh: string; nameEn: string; fileCode: string; company: string;
+}
+export interface Boot { me: Me; branches: BranchInfo[]; config: Record<string, string> }
+
+export interface PeriodRow {
+  pid: string; branch: string; ym: string; status: string; cover_mode: string;
+  submitted_by?: string; submitted_at?: string; reviewed_by?: string; reviewed_at?: string;
+  approved_by?: string; approved_at?: string; paid_by?: string; paid_at?: string; paid_ref?: string;
+  proc_rows: number; proc_sum: number; doc_count: number; shift_rows: number;
+  unmatched: { name: string; count: number; sum: number }[];
+  dup_groups: number; signed_docs: number; snapshot?: unknown; note?: string;
+}
+
+export interface Workspace {
+  pid: string; branch: string; ym: string;
+  period: PeriodRow | null;
+  procDays: ProcDayRow[];
+  shifts: ShiftRow[];
+  doctors: DoctorRow[];
+  rates: RateRow[];
+  adjusts: AdjustRow[];
+  signs: SignRow[];
+  aliases: { alias: string; licNo: string; branch: string; confirmedBy: string; confirmedAt: string }[];
+  imports: {
+    kind: string; fileName: string; rowsRead: number; rowsDoctor: number; rowsOther: number;
+    sumDoctorFee: number; status: string; by: string; at: string; note: string;
+  }[];
+  history: { step: string; action: string; actor: string; at: string; note: string }[];
+}
+
+export interface DashRow {
+  code: string; nameTh: string; nameEn: string; status: string;
+  procRows: number; procSum: number; doctors: number; shiftRows: number;
+  signedDocs: number; unmatched: number; paidRef: string; submittedBy: string; approvedAt: string;
+}
+export interface Dash {
+  ym: string; rows: DashRow[];
+  totalProcSum: number; totalDoctors: number; totalBranches: number;
+}
+
+/* ---------------------------- แคชในหน่วยความจำ ---------------------------- */
+const cache = new Map<string, unknown>();
+export const dropCache = (prefix?: string) => {
+  if (!prefix) { cache.clear(); return; }
+  [...cache.keys()].forEach((k) => { if (k.startsWith(prefix)) cache.delete(k); });
+};
+
+async function rpc<T>(fn: string, args: Record<string, unknown> = {}): Promise<T> {
+  const { data, error } = await supabase.rpc(fn, args);
+  if (error) throw new Error(error.message.replace(/^.*?:\s*/, ''));
+  return data as T;
+}
+
+async function cached<T>(key: string, load: () => Promise<T>): Promise<T> {
+  if (cache.has(key)) return cache.get(key) as T;
+  const v = await load();
+  cache.set(key, v);
+  return v;
+}
+
+/* --------------------------------- อ่าน --------------------------------- */
+export const api = {
+  bootstrap: () => rpc<Boot>('fee_bootstrap'),
+
+  dashboard: (ym: string) => cached(`dash:${ym}`, () => rpc<Dash>('fee_dashboard', { p_ym: ym })),
+
+  workspace: (branch: string, ym: string) =>
+    cached(`ws:${branch}:${ym}`, () => rpc<Workspace>('fee_workspace', { p_branch: branch, p_ym: ym })),
+
+  doctorSummary: (ym: string) => rpc<unknown[]>('fee_doctor_summary', { p_ym: ym }),
+
+  /** ประกอบ ctx สำหรับเครื่องคำนวณจากข้อมูลที่โหลดมาครั้งเดียว */
+  toCalcCtx(ws: Workspace, config: Record<string, string>): CalcCtx {
+    return {
+      branch: ws.branch, ym: ws.ym,
+      coverMode: ((ws.period?.cover_mode || config.COVER_SHIFT_SOURCE || 'SHEET') as 'SHEET' | 'HOURS'),
+      procDays: ws.procDays,
+      unmatched: ws.period?.unmatched || [],
+      dupGroups: ws.period?.dup_groups || 0,
+      shifts: ws.shifts,
+      doctors: ws.doctors,
+      rates: ws.rates,
+      adjusts: ws.adjusts,
+      signs: ws.signs,
+      signMode: config.REQUIRE_DOCTOR_SIGN || 'WARN',
+      graceEnable: config.GRACE_ENABLE || 'Y',
+      graceMin: config.GRACE_MIN || 15,
+      schedStart: config.SCHED_START || '12:00',
+      schedEnd: config.SCHED_END || '20:00',
+      graceEffDate: config.GRACE_EFFDATE || '2026-09-01',
+    };
+  },
+
+  /* -------------------------------- เขียน -------------------------------- */
+  async importProc(p: {
+    branch: string; ym: string; rows: unknown[]; file: string; hash: string;
+    unmatched: unknown[]; dupGroups: number;
+  }) {
+    const r = await rpc('fee_import_proc', {
+      p_branch: p.branch, p_ym: p.ym, p_rows: p.rows, p_file: p.file, p_hash: p.hash,
+      p_unmatched: p.unmatched, p_dup_groups: p.dupGroups,
+    });
+    dropCache();
+    return r as { pid: string; rowsRead: number; rowsDoctor: number; rowsOther: number; sumDoctorFee: number };
+  },
+
+  async saveAlias(alias: string, licNo: string, branch: string, ym: string) {
+    const r = await rpc('fee_save_alias', { p_alias: alias, p_lic: licNo, p_branch: branch, p_ym: ym });
+    dropCache();
+    return r;
+  },
+
+  async rematch(branch: string, ym: string) {
+    const r = await rpc('fee_rematch', { p_branch: branch, p_ym: ym });
+    dropCache();
+    return r as { matched: number; unmatched: unknown[] };
+  },
+
+  async saveShifts(branch: string, ym: string, rows: unknown[]) {
+    const r = await rpc('fee_save_shifts', { p_branch: branch, p_ym: ym, p_rows: rows });
+    dropCache();
+    return r as { saved: number };
+  },
+
+  async workflow(branch: string, ym: string, action: string, note = '', snapshot: unknown = null) {
+    const r = await rpc('fee_workflow', {
+      p_branch: branch, p_ym: ym, p_action: action, p_note: note, p_snapshot: snapshot,
+    });
+    dropCache();
+    return r as { pid: string; status: string };
+  },
+
+  async signMonth(p: {
+    branch: string; ym: string; licNo: string; hash: string; png: string;
+    signer: string; method?: string; device?: string;
+  }) {
+    const r = await rpc('fee_sign_month', {
+      p_branch: p.branch, p_ym: p.ym, p_lic: p.licNo, p_hash: p.hash, p_png: p.png,
+      p_signer: p.signer, p_method: p.method || 'DRAW', p_device: p.device || navigator.userAgent.slice(0, 80),
+    });
+    dropCache();
+    return r;
+  },
+
+  /* ------------------------- ตารางที่แก้ตรงได้ (RLS คุม) ------------------------- */
+  async listDoctors() {
+    const { data, error } = await supabase.from('doctor').select('*').order('lic_no');
+    if (error) throw new Error(error.message);
+    return data;
+  },
+  async saveDoctor(d: Record<string, unknown>) {
+    const { error } = await supabase.from('doctor').upsert({ ...d, updated_at: new Date().toISOString() });
+    if (error) throw new Error(error.message);
+    dropCache();
+  },
+  async listRates() {
+    const { data, error } = await supabase.from('rate').select('*').order('lic_no').order('eff_from');
+    if (error) throw new Error(error.message);
+    return data;
+  },
+  async saveRate(r: Record<string, unknown>) {
+    const { error } = await supabase.from('rate').upsert(r);
+    if (error) throw new Error(error.message);
+    dropCache();
+  },
+  async deleteRate(id: string) {
+    const { error } = await supabase.from('rate').delete().eq('id', id);
+    if (error) throw new Error(error.message);
+    dropCache();
+  },
+  async listConfig() {
+    const { data, error } = await supabase.from('config').select('*').order('key');
+    if (error) throw new Error(error.message);
+    return data;
+  },
+  async saveConfig(key: string, value: string) {
+    const { error } = await supabase.from('config')
+      .update({ value, updated_at: new Date().toISOString() }).eq('key', key);
+    if (error) throw new Error(error.message);
+    dropCache();
+  },
+  async listStaff() {
+    const { data, error } = await supabase.from('staff').select('*');
+    if (error) throw new Error(error.message);
+    const ids = (data || []).map((s: { id: string }) => s.id);
+    const { data: profs } = await supabase.schema('public').from('profiles')
+      .select('id, username, display_name, active, last_login').in('id', ids);
+    const byId = new Map((profs || []).map((p: { id: string }) => [p.id, p]));
+    return (data || []).map((s: { id: string }) => ({ ...s, profile: byId.get(s.id) }));
+  },
+  async saveStaff(s: Record<string, unknown>) {
+    const { error } = await supabase.from('staff').upsert(s);
+    if (error) throw new Error(error.message);
+    dropCache();
+  },
+  async listAudit(limit = 200) {
+    const { data, error } = await supabase.from('audit').select('*')
+      .order('at', { ascending: false }).limit(limit);
+    if (error) throw new Error(error.message);
+    return data;
+  },
+  /** รายการหัตถการดิบของรอบ — อ่านเฉพาะตอนต้องตรวจย้อนกลับ/ส่งออก CSV */
+  async listProc(pid: string) {
+    const { data, error } = await supabase.from('proc').select('*').eq('pid', pid).order('id');
+    if (error) throw new Error(error.message);
+    return data;
+  },
+};
