@@ -60,7 +60,9 @@ export const dropCache = (prefix?: string) => {
 };
 
 async function rpc<T>(fn: string, args: Record<string, unknown> = {}): Promise<T> {
-  const { data, error } = await supabase.rpc(fn, args);
+  // ฟังก์ชัน fee_* ทั้งหมดอยู่ที่ schema public (เรียกผ่าน PostgREST เป็น rpc ปกติ)
+  // ส่วน client หลักตั้ง default schema เป็น fee ไว้สำหรับ .from() ตารางตรง ๆ ด้านล่าง
+  const { data, error } = await supabase.schema('public').rpc(fn, args);
   if (error) throw new Error(error.message.replace(/^.*?:\s*/, ''));
   return data as T;
 }

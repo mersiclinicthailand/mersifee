@@ -66,7 +66,7 @@ export default function App() {
     <div className="shell">
       <header className="topbar">
         <div className="brand">
-          <span className="mark">M</span>
+          <img className="mark" src="/logo.png" alt="Mersi Clinic" />
           <span>
             Mersi Clinic
             <small>ระบบค่าตอบแทนแพทย์</small>
