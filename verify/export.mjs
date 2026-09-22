@@ -15,7 +15,7 @@ const mkRates = (licNos, rate = 900) => licNos.map((licNo) => ({
 }));
 const mkDocs = (licNos) => licNos.map((licNo) => ({
   licNo, fullName: 'นายทดสอบ ' + licNo, nickName: 'เล่น' + licNo,
-  bank: 'SCB', bankAcc: '0123456789', idCard: '1100800815189',
+  bank: 'SCB', bankAcc: '0000000000', idCard: '0000000000000',
   address: 'ที่อยู่ทดสอบ', contact: 'a@b.c', payeeType: 'PERSON', payeeName: '',
 }));
 const S = (licNo, d, ti, to, extra = {}) => ({

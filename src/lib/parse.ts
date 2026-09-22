@@ -2,7 +2,7 @@
  * parse.ts — อ่านไฟล์ Excel ในเบราว์เซอร์ (ไฟล์ต้นฉบับไม่ถูกอัปโหลดขึ้นเซิร์ฟเวอร์)
  * พอร์ตจากตัวอ่านเดิมใน Index.html ให้ได้ผลเท่าเดิมทุกกรณี
  * ==========================================================================*/
-import { cellStr, toIsoDate, toMinutes, minutesToHHMM, num, hash, TH_MONTHS, ymThai } from './core';
+import { cellStr, toIsoDate, toMinutes, minutesToHHMM, num, hash, TH_MONTHS, ymThai, pad2, TH_MONTHS_FULL } from './core';
 
 export interface ProcParsed {
   fileName: string; header: string;
@@ -233,4 +233,79 @@ export function toShiftPayload(parsed: ShiftParsed) {
     });
   });
   return out;
+}
+
+/* --------------------------- ตารางแพทย์ (ตารางเวร) ---------------------------
+ * โครงไฟล์ "ตารางเวร-YYYY-MM.xlsx" ที่ฝ่ายบุคคลทำทุกเดือน:
+ *   A1        = "ตารางเวร <เดือนไทย> <พ.ศ.>"
+ *   แถว 2     = กลุ่ม Area Manager (ผสานเซลล์ — ค่าอยู่ที่คอลัมน์แรกของกลุ่ม)
+ *   แถว 3     = หัวสาขา "BN\nบางนา"
+ *   แถว 4+    = "1 พฤ" แล้วตามด้วยชื่อหมอของแต่ละสาขา
+ * ช่องที่เขียนว่า "ไม่มีแพทย์" ไม่เก็บเป็นแถว
+ * ------------------------------------------------------------------------- */
+
+export interface RosterParsed {
+  ym: string;
+  cols: { code: string; label: string; am: string }[];
+  days: number;
+  rows: { workDate: string; branch: string; docLabel: string; amGroup: string }[];
+}
+
+/** คำที่ไฟล์เขียนไม่ตรงกับรหัสสาขาในระบบ (v2 ใช้ RM ตาม CRM) */
+const ROSTER_BRANCH_FIX: Record<string, string> = { RM2: 'RM' };
+
+export async function parseRosterFile(file: File): Promise<RosterParsed> {
+  const { XLSX, wb } = await readWorkbook(file);
+  const name = wb.SheetNames.find((n) => /ตารางเวร/.test(n)) || wb.SheetNames[0];
+  const aoa = XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets[name], {
+    header: 1, raw: true, defval: null, blankrows: true,
+  });
+
+  const title = cellText((aoa[0] || [])[0]);
+  let ym = '';
+  for (let i = 0; i < 12; i++) {
+    if (title.includes(TH_MONTHS_FULL[i])) {
+      const y = (title.match(/(\d{4})/) || [])[1];
+      if (y) ym = `${Number(y) - 543}-${pad2(i + 1)}`;
+      break;
+    }
+  }
+  if (!ym) {
+    throw new Error('อ่านเดือนจากหัวตารางไม่ได้ — ช่อง A1 ต้องเป็นเช่น "ตารางเวร ตุลาคม 2569"');
+  }
+
+  const am = (aoa[1] || []) as unknown[];
+  const head = (aoa[2] || []) as unknown[];
+  const cols: { c: number; code: string; label: string; am: string }[] = [];
+  let curAm = '';
+  for (let c = 1; c < head.length; c++) {
+    const h = cellText(head[c]);
+    if (!h) continue;
+    if (cellText(am[c])) curAm = cellText(am[c]);
+    const raw = h.split(/[\n\r]/)[0].trim().toUpperCase();
+    cols.push({ c, code: ROSTER_BRANCH_FIX[raw] || raw, label: h.replace(/[\n\r]+/g, ' ').trim(), am: curAm });
+  }
+  if (!cols.length) throw new Error('ไม่พบหัวสาขาในแถวที่ 3 ของไฟล์');
+
+  const rows: RosterParsed['rows'] = [];
+  const days = new Set<string>();
+  for (let r = 3; r < aoa.length; r++) {
+    const a = (aoa[r] || []) as unknown[];
+    const dtxt = cellText(a[0]);
+    if (!dtxt) continue;
+    const m = dtxt.match(/\d+/);
+    if (!m) continue;
+    const d = Number(m[0]);
+    if (!d || d > 31) continue;
+    const iso = `${ym}-${pad2(d)}`;
+    days.add(iso);
+    cols.forEach((col) => {
+      const v = cellText(a[col.c]);
+      if (!v || v === 'ไม่มีแพทย์' || v === '-') return;
+      rows.push({ workDate: iso, branch: col.code, docLabel: v, amGroup: col.am });
+    });
+  }
+  if (!rows.length) throw new Error('ไม่พบเวรในไฟล์ — ตรวจว่าวันที่เริ่มที่แถว 4 และมีชื่อแพทย์ในตาราง');
+
+  return { ym, cols: cols.map(({ code, label, am: g }) => ({ code, label, am: g })), days: days.size, rows };
 }

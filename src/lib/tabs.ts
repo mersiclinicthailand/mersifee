@@ -22,6 +22,7 @@ export interface TabDef {
 export const TABS: TabDef[] = [
   { to: '/',          label: 'ภาพรวม',      always: true },
   { to: '/import',    label: 'นำเข้าข้อมูล', show: (r) => can.editData(r) },
+  { to: '/roster',    label: 'ตารางแพทย์' },
   { to: '/shifts',    label: 'ใบเวรแพทย์' },
   { to: '/clock',     label: 'ลงเวลา' },
   { to: '/calc',      label: 'คำนวณ' },

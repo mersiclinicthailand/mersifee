@@ -1,36 +1,28 @@
 import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom';
-import { useAuth, can } from './lib/auth';
+import { useAuth } from './lib/auth';
+import { visibleTabs } from './lib/tabs';
 import { APP_VERSION } from './lib/supabase';
 import { Loading, Skeleton } from './components/ui';
 import Login from './pages/Login';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Import    = lazy(() => import('./pages/Import'));
+const Roster    = lazy(() => import('./pages/Roster'));
 const Shifts    = lazy(() => import('./pages/Shifts'));
 const Clock     = lazy(() => import('./pages/Clock'));
 const Calc      = lazy(() => import('./pages/Calc'));
 const Reconcile = lazy(() => import('./pages/Reconcile'));
 const Approve   = lazy(() => import('./pages/Approve'));
+const EmailPage = lazy(() => import('./pages/Email'));
 const Registry  = lazy(() => import('./pages/Registry'));
 const Settings  = lazy(() => import('./pages/Settings'));
+const Sign      = lazy(() => import('./pages/Sign'));
 
 export interface Scope {
   branch: string; ym: string;
   setBranch: (v: string) => void; setYm: (v: string) => void;
 }
-
-const TABS: { to: string; label: string; show?: (r: string) => boolean }[] = [
-  { to: '/',          label: 'ภาพรวม' },
-  { to: '/import',    label: 'นำเข้าข้อมูล', show: (r) => can.editData(r) },
-  { to: '/shifts',    label: 'ใบเวรแพทย์' },
-  { to: '/clock',     label: 'ลงเวลา' },
-  { to: '/calc',      label: 'คำนวณ' },
-  { to: '/reconcile', label: 'กระทบยอด' },
-  { to: '/approve',   label: 'อนุมัติ' },
-  { to: '/registry',  label: 'ทะเบียน' },
-  { to: '/settings',  label: 'ตั้งค่า' },
-];
 
 export default function App() {
   const { boot, loading, error, signOut } = useAuth();
@@ -56,17 +48,33 @@ export default function App() {
 
   const scope: Scope = useMemo(() => ({ branch, ym, setBranch, setYm }), [branch, ym]);
 
+  /** หน้าเซ็นของแพทย์เปิดจากลิงก์ในอีเมล ต้องเข้าได้ก่อนล็อกอิน
+   *  จึงต้องตัดสินใจก่อนด่านตรวจสิทธิ์ทั้งหมด */
+  if (loc.pathname.startsWith('/sign/')) {
+    return (
+      <Suspense fallback={<Loading />}>
+        <Routes location={loc}>
+          <Route path="/sign/:token" element={<Sign />} />
+        </Routes>
+      </Suspense>
+    );
+  }
+
   if (loading) return <Loading />;
   if (!boot) return <Login error={error} />;
 
-  const role = boot.me.role;
-  const tabs = TABS.filter((t) => !t.show || t.show(role));
+  const tabs = visibleTabs(boot.me.role, boot.me.tabs);
+  const allowed = new Set(tabs.map((t) => t.to));
+  /** เข้า URL ตรง ๆ ของแท็บที่ไม่มีสิทธิ์ → เด้งกลับหน้าแรก
+   *  (เป็นแค่การกันเข้าหน้าจอ สิทธิ์จริงบังคับที่ฐานข้อมูลอยู่แล้ว) */
+  const guard = (to: string, el: React.ReactElement) =>
+    (allowed.has(to) ? el : <Navigate to="/" replace />);
 
   return (
     <div className="shell">
       <header className="topbar">
         <div className="brand">
-          <span className="mark">M</span>
+          <img className="mark" src="/logo.png" alt="Mersi Clinic" />
           <span>
             Mersi Clinic
             <small>ระบบค่าตอบแทนแพทย์</small>
@@ -94,14 +102,16 @@ export default function App() {
         <Suspense fallback={<div className="card"><Skeleton rows={4} /></div>}>
           <Routes location={loc}>
             <Route path="/"          element={<Dashboard scope={scope} />} />
-            <Route path="/import"    element={<Import scope={scope} />} />
-            <Route path="/shifts"    element={<Shifts scope={scope} />} />
-            <Route path="/clock"     element={<Clock scope={scope} />} />
-            <Route path="/calc"      element={<Calc scope={scope} />} />
-            <Route path="/reconcile" element={<Reconcile scope={scope} />} />
-            <Route path="/approve"   element={<Approve scope={scope} />} />
-            <Route path="/registry"  element={<Registry />} />
-            <Route path="/settings"  element={<Settings />} />
+            <Route path="/import"    element={guard('/import', <Import scope={scope} />)} />
+            <Route path="/roster"    element={guard('/roster', <Roster scope={scope} />)} />
+            <Route path="/shifts"    element={guard('/shifts', <Shifts scope={scope} />)} />
+            <Route path="/clock"     element={guard('/clock', <Clock scope={scope} />)} />
+            <Route path="/calc"      element={guard('/calc', <Calc scope={scope} />)} />
+            <Route path="/reconcile" element={guard('/reconcile', <Reconcile scope={scope} />)} />
+            <Route path="/approve"   element={guard('/approve', <Approve scope={scope} />)} />
+            <Route path="/email"     element={guard('/email', <EmailPage scope={scope} />)} />
+            <Route path="/registry"  element={guard('/registry', <Registry />)} />
+            <Route path="/settings"  element={guard('/settings', <Settings />)} />
             <Route path="*"          element={<Navigate to="/" replace />} />
           </Routes>
         </Suspense>

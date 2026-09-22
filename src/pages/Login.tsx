@@ -27,7 +27,7 @@ export default function Login({ error }: { error?: string | null }) {
     <div className="login-wrap">
       <div className="login">
         <div className="card">
-          <div className="mark-lg">M</div>
+          <img className="mark-lg" src="/logo.png" alt="Mersi Clinic" />
           <h1 style={{ textAlign: 'center', marginBottom: 2 }}>Mersi Clinic</h1>
           <p className="muted" style={{ textAlign: 'center', marginTop: 0, marginBottom: 18 }}>
             ระบบค่าหัตถการและค่าตอบแทนแพทย์
