@@ -42,23 +42,9 @@ export default function Clock({ scope }: { scope: Scope }) {
   const today = todayIso();
   const myLic = boot?.me.licNo;
 
-  /** แพทย์ที่ “ประจำเวร” สาขานี้ในรอบนี้ = มีบรรทัดใบเวรของสาขานี้อย่างน้อย 1 บรรทัด
-   *  (ใบเวรผูกกับรอบ ซึ่งผูกกับสาขาอยู่แล้ว จึงเป็นรายชื่อเฉพาะสาขานี้เสมอ) */
-  const onDuty = useMemo(
-    () => new Set((ws?.shifts || []).map((s) => cellStr(s.licNo)).filter(Boolean)),
-    [ws],
-  );
-  /** ยังไม่มีใบเวรเลย → ต้องโชว์ทุกคน ไม่งั้นวันแรกของเดือนจะลงเวลาไม่ได้ */
-  const noRoster = onDuty.size === 0;
-  const [showAll, setShowAll] = useState(false);
-
   const docs = useMemo(
-    () => (ws?.doctors || []).filter((d) => {
-      if (myLic) return d.licNo === myLic;            // บัญชีแพทย์เห็นเฉพาะตัวเอง
-      if (showAll || noRoster) return true;           // กดดูทั้งทะเบียน
-      return onDuty.has(d.licNo || '');               // ปกติ: เฉพาะหมอที่มีเวรสาขานี้
-    }),
-    [ws, myLic, onDuty, showAll, noRoster],
+    () => (ws?.doctors || []).filter((d) => !myLic || d.licNo === myLic),
+    [ws, myLic],
   );
 
   /** สถานะวันนี้ของแพทย์แต่ละคน: ยังไม่เข้า / อยู่ในเวร / ออกแล้ว */
@@ -147,19 +133,6 @@ export default function Clock({ scope }: { scope: Scope }) {
           เปิดหน้าจอนี้ค้างไว้ที่เคาน์เตอร์ — แพทย์กดเข้า/ออกเวรเอง
           ระบบบันทึกบัญชีที่เปิดหน้าจอไว้เป็นพยานทุกครั้ง
         </p>
-        {!myLic && !noRoster && (
-          <div className="row" style={{ marginBottom: 10 }}>
-            <span className="pill none">
-              แสดงเฉพาะแพทย์ที่มีเวรสาขานี้ {onDuty.size} คน
-            </span>
-            <label className="muted" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <input type="checkbox" checked={showAll}
-                onChange={(e) => setShowAll(e.target.checked)}
-              />
-              แสดงแพทย์ทุกคนในทะเบียน (กรณีมีหมอมาแทนเวรกะทันหัน)
-            </label>
-          </div>
-        )}
         {!ws ? <Skeleton rows={4} /> : (
           <div className="grid g3">
             {board.map(({ doc, open, done }) => (
@@ -195,11 +168,7 @@ export default function Clock({ scope }: { scope: Scope }) {
               </div>
             ))}
             {board.length === 0 && (
-              <p className="muted">
-                {noRoster
-                  ? 'ยังไม่มีแพทย์ในทะเบียน — เพิ่มที่แท็บ “ทะเบียน” ก่อน'
-                  : 'ยังไม่มีแพทย์คนไหนมีใบเวรของสาขานี้ในรอบนี้ — ติ๊ก “แสดงแพทย์ทุกคน” ด้านบนถ้าต้องการลงเวลาให้หมอนอกตาราง'}
-              </p>
+              <p className="muted">ยังไม่มีแพทย์ในทะเบียน — เพิ่มที่แท็บ “ทะเบียน” ก่อน</p>
             )}
           </div>
         )}

@@ -1,12 +1,11 @@
 import { useEffect, useState } from 'react';
-import { api, type PoolRow, type PoolSearch } from '../lib/api';
+import { api } from '../lib/api';
 import { useAuth, can } from '../lib/auth';
 import { Alerts, Card, Money, Note, Skeleton, useAsync } from '../components/ui';
 
 interface Doctor {
   lic_no: string; full_name: string; nick_name: string; bank: string; bank_acc: string;
-  id_card: string; address: string; contact: string; email: string;
-  payee_type: string; payee_name: string;
+  id_card: string; address: string; contact: string; payee_type: string; payee_name: string;
   status: string; note: string;
 }
 interface Rate {
@@ -17,8 +16,7 @@ interface Rate {
 
 const BLANK_DOC: Doctor = {
   lic_no: '', full_name: '', nick_name: '', bank: '', bank_acc: '', id_card: '',
-  address: '', contact: '', email: '',
-  payee_type: 'PERSON', payee_name: '', status: 'ACTIVE', note: '',
+  address: '', contact: '', payee_type: 'PERSON', payee_name: '', status: 'ACTIVE', note: '',
 };
 const BLANK_RATE: Rate = {
   lic_no: '', branch: '', hourly_rate: 0, tax_base: 'TOTAL', tax_rate: 3,
@@ -38,12 +36,6 @@ export default function Registry() {
   const [editRate, setEditRate] = useState<Rate | null>(null);
   const { busy, err, msg, setErr, setMsg, run } = useAsync();
 
-  /* คลังรายชื่อแพทย์ — 674 รายชื่อที่ย้ายมาจากระบบเดิมแต่ยังไม่เคยขึ้นทะเบียน */
-  const [poolOpen, setPoolOpen] = useState(false);
-  const [poolQ, setPoolQ] = useState('');
-  const [pool, setPool] = useState<PoolSearch | null>(null);
-  const [poolPick, setPoolPick] = useState<Set<string>>(new Set());
-
   const role = boot?.me.role;
   const mayDoc = can.registry(role);
   const mayRate = can.rates(role);
@@ -53,37 +45,6 @@ export default function Registry() {
     api.listRates().then((r) => setRates(r as Rate[])).catch((e) => setErr(e.message));
   };
   useEffect(load, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  /* ค้นคลังแบบหน่วงคำพิมพ์ — กันยิงทุกตัวอักษร */
-  useEffect(() => {
-    if (!poolOpen) return;
-    setPool(null);
-    const t = setTimeout(() => {
-      api.poolSearch(poolQ, 100).then(setPool).catch((e) => setErr(e.message));
-    }, poolQ ? 300 : 0);
-    return () => clearTimeout(t);
-  }, [poolOpen, poolQ]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const togglePick = (lic: string) => setPoolPick((s) => {
-    const n = new Set(s);
-    if (n.has(lic)) n.delete(lic); else n.add(lic);
-    return n;
-  });
-
-  const promote = () => run(async () => {
-    const licNos = [...poolPick];
-    if (!licNos.length) throw new Error('ยังไม่ได้เลือกแพทย์');
-    const r = await api.poolPromote(licNos);
-    setPoolPick(new Set());
-    load();
-    setPool(null);
-    api.poolSearch(poolQ, 100).then(setPool).catch(() => { /* โหลดใหม่ไม่ได้ก็ไม่เป็นไร */ });
-    setMsg(
-      `ขึ้นทะเบียนแล้ว ${r.added} คน`
-      + (r.skipped ? ` · ข้ามที่มีในทะเบียนอยู่แล้ว ${r.skipped} คน` : '')
-      + ' — อย่าลืมตั้งอัตราค่าตอบแทนที่แท็บ “อัตราและสัญญา”',
-    );
-  });
 
   const saveDoc = () => editDoc && run(async () => {
     if (!editDoc.lic_no.trim() || !editDoc.full_name.trim()) {
@@ -120,16 +81,7 @@ export default function Registry() {
       {tab === 'doc' && (
         <Card
           title={`ทะเบียนแพทย์ (${docs?.length ?? '—'} คน)`}
-          right={mayDoc && (
-            <div className="row" style={{ gap: 6 }}>
-              <button className={poolOpen ? 'primary' : ''}
-                onClick={() => { setPoolOpen(!poolOpen); setPoolPick(new Set()); }}
-              >
-                {poolOpen ? 'ปิดคลังรายชื่อ' : 'ดึงจากคลังรายชื่อ'}
-              </button>
-              <button className="primary" onClick={() => setEditDoc({ ...BLANK_DOC })}>+ เพิ่มแพทย์</button>
-            </div>
-          )}
+          right={mayDoc && <button className="primary" onClick={() => setEditDoc({ ...BLANK_DOC })}>+ เพิ่มแพทย์</button>}
         >
           {!mayDoc && <Note tone="info">บทบาทของคุณดูได้อย่างเดียว — แก้ไขได้เฉพาะฝ่ายบุคคลและผู้ดูแลระบบ</Note>}
           {!docs ? <Skeleton rows={5} /> : (
@@ -138,8 +90,7 @@ export default function Registry() {
                 <thead>
                   <tr>
                     <th>รหัส ว.</th><th>ชื่อ-สกุล</th><th>ชื่อเล่น</th><th>ธนาคาร</th>
-                    <th>เลขบัญชี</th><th>ผู้รับเงิน</th><th>ติดต่อ</th><th>อีเมล</th>
-                    <th>สถานะ</th><th></th>
+                    <th>เลขบัญชี</th><th>ผู้รับเงิน</th><th>ติดต่อ</th><th>สถานะ</th><th></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -157,11 +108,6 @@ export default function Registry() {
                       </td>
                       <td className="muted">{d.contact}</td>
                       <td>
-                        {d.email
-                          ? <span className="muted">{d.email}</span>
-                          : <span className="pill warn">ยังไม่มีอีเมล</span>}
-                      </td>
-                      <td>
                         <span className={`pill ${d.status === 'ACTIVE' ? 'ok' : 'none'}`}>
                           {d.status === 'ACTIVE' ? 'ปฏิบัติงาน' : 'พ้นสภาพ'}
                         </span>
@@ -172,100 +118,11 @@ export default function Registry() {
                     </tr>
                   ))}
                   {docs.length === 0 && (
-                    <tr><td colSpan={10} className="muted">ยังไม่มีแพทย์ในทะเบียน</td></tr>
+                    <tr><td colSpan={9} className="muted">ยังไม่มีแพทย์ในทะเบียน</td></tr>
                   )}
                 </tbody>
               </table>
             </div>
-          )}
-        </Card>
-      )}
-
-      {/* ---------- คลังรายชื่อแพทย์ ---------- */}
-      {tab === 'doc' && poolOpen && mayDoc && (
-        <Card
-          title={`คลังรายชื่อแพทย์ — ยังไม่ได้ขึ้นทะเบียน ${pool?.pool ?? '—'} คน`}
-          right={
-            <button className="primary" disabled={busy || !poolPick.size} onClick={promote}>
-              ขึ้นทะเบียนที่เลือก ({poolPick.size})
-            </button>
-          }
-        >
-          <Note tone="info">
-            รายชื่อชุดนี้ย้ายมาพร้อมระบบเดิมแต่ไม่เคยถูกขึ้นทะเบียน จึงไม่ปรากฏในทะเบียนแพทย์ ·
-            ช่อง<b>ที่มา</b>คือสถานที่ทำงานเดิมที่ติดมากับข้อมูล ไม่ใช่สาขา Mersi ·
-            ขึ้นทะเบียนแล้ว<b>ยังคำนวณไม่ได้จนกว่าจะตั้งอัตราค่าตอบแทน</b>ให้แพทย์คนนั้น
-          </Note>
-
-          <div className="field" style={{ maxWidth: 420 }}>
-            <label>ค้นหา — รหัส ว. / ชื่อ-สกุล / ชื่อเล่น / ที่มา</label>
-            <input value={poolQ} placeholder="เช่น สมชาย หรือ 96849 หรือ ขอนแก่น"
-              onChange={(e) => setPoolQ(e.target.value)}
-            />
-          </div>
-
-          {!pool ? <Skeleton rows={4} /> : (
-            <>
-              <div className="row" style={{ marginBottom: 8 }}>
-                <span className="muted">
-                  พบ {pool.found} คน
-                  {pool.found > pool.rows.length && ` · แสดง ${pool.rows.length} คนแรก พิมพ์ค้นหาเพิ่มเพื่อให้แคบลง`}
-                </span>
-                <div className="spacer" />
-                <button className="sm" disabled={busy || !pool.rows.length}
-                  onClick={() => setPoolPick(new Set(pool.rows.map((r) => r.licNo)))}
-                >
-                  เลือกทั้งหมดที่แสดง
-                </button>
-                <button className="sm" disabled={busy || !poolPick.size}
-                  onClick={() => setPoolPick(new Set())}
-                >
-                  ล้างที่เลือก
-                </button>
-              </div>
-
-              <div className="tablewrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th style={{ width: 34 }}></th>
-                      <th>รหัส ว.</th><th>ชื่อ-สกุล</th><th>ชื่อเล่น</th>
-                      <th>ธนาคาร</th><th>เลขบัญชี</th><th>อีเมล</th><th>ที่มา</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {pool.rows.map((r: PoolRow) => (
-                      <tr key={r.licNo}>
-                        <td>
-                          <input type="checkbox" disabled={busy}
-                            checked={poolPick.has(r.licNo)}
-                            onChange={() => togglePick(r.licNo)}
-                          />
-                        </td>
-                        <td>{r.licNo}</td>
-                        <td>{r.name}</td>
-                        <td>{r.nick}</td>
-                        <td>{r.bank}</td>
-                        <td className="tnum">{r.bankAcc}</td>
-                        <td>
-                          {r.email
-                            ? <span className="muted">{r.email}</span>
-                            : <span className="pill warn">ไม่มีอีเมล</span>}
-                        </td>
-                        <td className="muted">{r.source}</td>
-                      </tr>
-                    ))}
-                    {pool.rows.length === 0 && (
-                      <tr>
-                        <td colSpan={8} className="muted">
-                          {poolQ ? 'ไม่พบรายชื่อที่ตรงกับคำค้น' : 'ขึ้นทะเบียนครบทุกคนในคลังแล้ว'}
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </>
           )}
         </Card>
       )}
@@ -333,8 +190,7 @@ export default function Registry() {
             {([
               ['lic_no', 'รหัส ว.'], ['full_name', 'ชื่อ-สกุล'], ['nick_name', 'ชื่อเล่น'],
               ['bank', 'ธนาคาร'], ['bank_acc', 'เลขบัญชี'], ['id_card', 'เลขบัตรประชาชน'],
-              ['contact', 'เบอร์ติดต่อ'], ['email', 'อีเมล (ใช้ส่งหนังสือรับรองรายได้)'],
-      ['payee_name', 'ชื่อผู้รับเงิน (ถ้าเป็นนิติบุคคล)'],
+              ['contact', 'เบอร์ติดต่อ / อีเมล'], ['payee_name', 'ชื่อผู้รับเงิน (ถ้าเป็นนิติบุคคล)'],
             ] as [keyof Doctor, string][]).map(([k, label]) => (
               <div className="field" key={k}>
                 <label>{label}</label>

@@ -8,16 +8,15 @@ import {
   STATUS_TH, useAsync,
 } from '../components/ui';
 
-type Action = 'SUBMIT' | 'APPROVE' | 'REJECT' | 'PAID';
+type Action = 'SUBMIT' | 'REVIEW' | 'APPROVE' | 'REJECT' | 'PAID';
 
 const STEPS: { key: string; label: string; who: string }[] = [
   { key: 'DRAFT',     label: '① จัดทำ',       who: 'พนักงานสาขา' },
   { key: 'SUBMITTED', label: '② ส่งตรวจ',      who: 'พนักงานสาขา' },
-  { key: 'APPROVED',  label: '③ อนุมัติ',      who: 'ฝ่าย HR' },
-  { key: 'PAID',      label: '④ บันทึกจ่าย',   who: 'ฝ่ายบัญชี' },
+  { key: 'REVIEWED',  label: '③ บัญชีตรวจ',    who: 'ฝ่ายบัญชี' },
+  { key: 'APPROVED',  label: '④ อนุมัติ',      who: 'ผู้อนุมัติ' },
+  { key: 'PAID',      label: '⑤ บันทึกจ่าย',   who: 'ฝ่ายบัญชี' },
 ];
-// REVIEWED ยังอยู่ใน enum ของฐานข้อมูลเผื่อรอบเก่าที่ค้างอยู่ในสถานะนั้น
-// แต่หน้าจอนี้ไม่ใช้แล้ว — HR อนุมัติได้ตรงจาก SUBMITTED เลย
 const ORDER = ['NONE', 'DRAFT', 'SUBMITTED', 'REVIEWED', 'APPROVED', 'PAID'];
 
 export default function Approve({ scope }: { scope: Scope }) {
@@ -51,15 +50,23 @@ export default function Approve({ scope }: { scope: Scope }) {
       ok: ['DRAFT', 'REJECTED'].includes(status) && blockers === 0,
       why: blockers ? `ยังมีปัญหาระดับบล็อก ${blockers} รายการ` : 'รอบนี้ไม่ได้อยู่สถานะที่ส่งตรวจได้',
     },
-    APPROVE: {
-      ok: status === 'SUBMITTED' && can.approve(role) && p?.submitted_by !== me,
-      why: !can.approve(role) ? 'เฉพาะฝ่าย HR'
-        : p?.submitted_by === me ? 'ผู้อนุมัติต้องเป็นคนละบัญชีกับผู้จัดทำ'
+    REVIEW: {
+      ok: status === 'SUBMITTED' && can.review(role) && p?.submitted_by !== me,
+      why: !can.review(role) ? 'เฉพาะฝ่ายบัญชี'
+        : p?.submitted_by === me ? 'ผู้ตรวจต้องเป็นคนละบัญชีกับผู้ส่งตรวจ'
           : 'ต้องอยู่สถานะส่งตรวจแล้ว',
     },
+    APPROVE: {
+      ok: status === 'REVIEWED' && can.approve(role)
+        && p?.submitted_by !== me && p?.reviewed_by !== me,
+      why: !can.approve(role) ? 'เฉพาะผู้อนุมัติหรือผู้บริหาร'
+        : (p?.submitted_by === me || p?.reviewed_by === me)
+          ? 'ผู้อนุมัติต้องเป็นคนละบัญชีกับผู้จัดทำและผู้ตรวจ'
+          : 'ต้องผ่านการตรวจจากฝ่ายบัญชีก่อน',
+    },
     REJECT: {
-      ok: status === 'SUBMITTED' && can.approve(role),
-      why: !can.approve(role) ? 'เฉพาะฝ่าย HR' : 'ตีกลับได้เฉพาะรอบที่ส่งตรวจแล้ว',
+      ok: ['SUBMITTED', 'REVIEWED'].includes(status) && (can.review(role) || can.approve(role)),
+      why: 'ตีกลับได้เฉพาะรอบที่ส่งตรวจแล้ว',
     },
     PAID: {
       ok: status === 'APPROVED' && can.review(role),
@@ -68,7 +75,7 @@ export default function Approve({ scope }: { scope: Scope }) {
   };
 
   const LABEL: Record<Action, string> = {
-    SUBMIT: 'ส่งตรวจ', APPROVE: 'อนุมัติ',
+    SUBMIT: 'ส่งตรวจ', REVIEW: 'ตรวจผ่าน', APPROVE: 'อนุมัติ',
     REJECT: 'ตีกลับ', PAID: 'บันทึกจ่าย',
   };
 
@@ -132,7 +139,7 @@ export default function Approve({ scope }: { scope: Scope }) {
             )}
 
             <div className="row" style={{ marginTop: 12 }}>
-              {(['SUBMIT', 'APPROVE', 'REJECT', 'PAID'] as Action[]).map((a) => (
+              {(['SUBMIT', 'REVIEW', 'APPROVE', 'REJECT', 'PAID'] as Action[]).map((a) => (
                 <button
                   key={a}
                   className={a === 'REJECT' ? 'danger' : canDo[a].ok ? 'primary' : ''}
@@ -145,7 +152,7 @@ export default function Approve({ scope }: { scope: Scope }) {
               ))}
             </div>
             <p className="muted" style={{ marginBottom: 0 }}>
-              ระบบบังคับว่าผู้จัดทำและผู้อนุมัติ (ฝ่าย HR) ต้องเป็นคนละบัญชี — ตรวจที่ฐานข้อมูลทุกครั้ง
+              ระบบบังคับว่าผู้จัดทำ ผู้ตรวจ และผู้อนุมัติต้องเป็นคนละบัญชี — ตรวจที่ฐานข้อมูลทุกครั้ง
               ไม่ใช่แค่ซ่อนปุ่ม · เมื่ออนุมัติแล้วยอดถูกล็อกเป็น snapshot แก้ไม่ได้อีก
             </p>
           </Card>
