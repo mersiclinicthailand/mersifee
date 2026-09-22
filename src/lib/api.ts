@@ -229,6 +229,16 @@ export const api = {
    */
   roster: (ym: string) => cached(`roster:${ym}`, () => rpc<RosterMonth>('fee_roster_get', { p_ym: ym })),
 
+  /** เพิ่ม/แก้/ลบ เวรทีละช่องจากหน้าปฏิทิน — ส่ง label ว่าง = ลบ (ไม่มีแพทย์) */
+  async rosterSet(branch: string, workDate: string, label: string, licNo?: string) {
+    const r = await rpc<{ cleared: boolean; ym: string; licNo?: string; poolLic?: string }>(
+      'fee_roster_set',
+      { p_branch: branch, p_date: workDate, p_label: label, p_lic: licNo || null },
+    );
+    dropCache('roster:');
+    return r;
+  },
+
   async rosterImport(ym: string, rows: unknown[]) {
     const r = await rpc<RosterImportResult>('fee_roster_import', { p_ym: ym, p_rows: rows });
     dropCache('roster:');

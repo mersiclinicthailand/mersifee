@@ -194,3 +194,81 @@ table input, table select { padding: 4px 7px; font-size: .84rem; border-radius: 
   .topbar, .tabs, button { display: none !important; }
   .card { box-shadow: none; break-inside: avoid; }
 }
+
+/* ============================================================
+   ตารางแพทย์ — มุมมองปฏิทิน
+   ============================================================ */
+.seg {
+  display: inline-flex; border: 1px solid var(--line); border-radius: 9px;
+  overflow: hidden; background: var(--card);
+}
+.seg button {
+  border: 0; border-radius: 0; background: transparent; padding: 5px 13px;
+  font-size: .84rem; font-weight: 600; color: var(--ink-2);
+}
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button.on { background: var(--sage); color: #fff; }
+.seg button.on:hover { background: var(--sage-dk); }
+
+.cal { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
+.cal .dow {
+  text-align: center; font-size: .76rem; font-weight: 700; color: var(--ink-3);
+  padding: 2px 0 4px; letter-spacing: .02em;
+}
+.cal .dow.we { color: var(--bad); }
+.cal .cell {
+  min-height: 82px; border: 1px solid var(--line); border-radius: 11px;
+  background: var(--card); padding: 7px 7px 8px; display: flex; flex-direction: column;
+  gap: 5px; align-items: stretch; text-align: left; font: inherit; color: inherit;
+  transition: border-color .12s, box-shadow .12s, background .12s;
+}
+.cal .cell.pad { background: transparent; border-color: transparent; min-height: 0; }
+.cal .cell.we { background: #FBFAF5; }
+.cal .cell.today { border-color: var(--sage); box-shadow: 0 0 0 2px var(--sage-lt) inset; }
+.cal button.cell { cursor: pointer; }
+.cal button.cell:hover { border-color: var(--sage); box-shadow: var(--shadow); }
+.cal .d {
+  font-size: .82rem; font-weight: 700; color: var(--ink-2);
+  font-variant-numeric: tabular-nums; display: flex; align-items: center; gap: 5px;
+}
+.cal .cell.we .d { color: var(--bad); }
+.cal .d .dn { font-size: .68rem; font-weight: 600; color: var(--ink-3); }
+.cal .cell.today .d .dn { color: var(--sage-dk); }
+
+.chip {
+  display: inline-flex; align-items: center; gap: 5px; max-width: 100%;
+  border: 1px solid; border-radius: 999px; padding: 3px 9px;
+  font-size: .82rem; font-weight: 600; line-height: 1.35;
+}
+.chip span.t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip.sm { font-size: .74rem; padding: 1px 7px; }
+.chip .mk { font-size: .68rem; opacity: .8; flex: none; }
+.cal .none {
+  border: 1px dashed var(--line); border-radius: 999px; color: var(--ink-3);
+  font-size: .78rem; padding: 3px 9px; text-align: center;
+}
+.cal .bl { display: flex; flex-wrap: wrap; gap: 3px; }
+.cal .bl .bcode {
+  font-size: .68rem; font-weight: 700; color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: .78rem; color: var(--ink-3); }
+.legend b { color: var(--ink-2); font-weight: 600; }
+
+.picks { display: flex; flex-wrap: wrap; gap: 6px; }
+.picks button {
+  padding: 0; border: 0; background: transparent; border-radius: 999px; cursor: pointer;
+}
+.picks button:hover { filter: brightness(.96); }
+
+@media (max-width: 640px) {
+  .cal { gap: 4px; }
+  .cal .cell { min-height: 68px; padding: 5px; border-radius: 9px; }
+  .chip { font-size: .72rem; padding: 2px 7px; }
+  .cal .d { font-size: .74rem; }
+}
+
+/* แถววันนี้ และคอลัมน์สาขาที่กำลังเลือก ในตารางรวม */
+table tr.today > td { background: var(--sage-lt); }
+table th.on { background: var(--sage-lt); color: var(--sage-dk); }
