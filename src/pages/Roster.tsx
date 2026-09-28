@@ -146,15 +146,28 @@ export default function Roster({ scope }: { scope: Scope }) {
   const today = todayIso();
   const firstDow = new Date(`${scope.ym}-01T00:00:00`).getDay();
 
-  const chip = (r: RosterRow, small?: boolean) => (
-    <span className={`chip${small ? ' sm' : ''}`} style={docColor(r.docLabel)}
-      title={r.licNo ? `${data?.names[r.licNo] || ''} (ว. ${r.licNo})`
-        : r.poolLic ? `อยู่ในคลังรายชื่อแพทย์ (ว. ${r.poolLic})` : 'ยังไม่รู้จักชื่อนี้ในระบบ'}
-    >
-      <span className="t">{r.docLabel}</span>
-      {!r.licNo && <span className="mk">{r.poolLic ? '○' : '?'}</span>}
-    </span>
-  );
+  /** ป้ายชื่อแพทย์ 1 ช่อง — บรรทัดล่างคือเลข ว. เพื่อให้ยืนยันตัวคนได้โดยไม่ต้องชี้เมาส์ */
+  const chip = (r: RosterRow, small?: boolean) => {
+    const lic = r.licNo || r.poolLic;
+    const cancelled = r.status === 'ยกเลิก';
+    const tip = [
+      r.licNo ? `${data?.names[r.licNo] || ''} (ว. ${r.licNo})`
+        : r.poolLic ? `${data?.names[r.poolLic] || ''} · อยู่ในคลังรายชื่อแพทย์ (ว. ${r.poolLic})`
+          : 'ยังไม่รู้จักชื่อนี้ในระบบ — ยังไม่มีเลข ว.',
+      cancelled ? 'เวรนี้ถูกยกเลิก' : '',
+      r.note,
+    ].filter(Boolean).join('\n');
+    return (
+      <span className={`chip${small ? ' sm' : ''}${cancelled ? ' off' : ''}`}
+        style={cancelled ? undefined : docColor(r.docLabel)} title={tip}
+      >
+        <span className="t">{r.docLabel}</span>
+        {lic ? <span className="lic">ว.{lic}</span> : <span className="mk">?</span>}
+        {!r.licNo && r.poolLic && <span className="mk">○</span>}
+        {r.note && <span className="mk">✎</span>}
+      </span>
+    );
+  };
 
   return (
     <>
@@ -189,7 +202,16 @@ export default function Roster({ scope }: { scope: Scope }) {
                 <Stat k="จำนวนวัน" v={parsed.days} />
                 <Stat k="สาขาในไฟล์" v={parsed.cols.length} />
                 <Stat k="เวรที่อ่านได้" v={parsed.rows.length} />
+                <Stat k="มีเลข ว. มาในไฟล์" v={`${parsed.withLic} / ${parsed.rows.length}`}
+                  tone={parsed.withLic === parsed.rows.length ? 'ok' : 'warn'} />
+                <Stat k="เวรที่ยกเลิก" v={parsed.cancelled} />
               </div>
+              <Note tone={parsed.source === 'SUMMARY' ? 'ok' : 'warn'}>
+                {parsed.source === 'SUMMARY'
+                  ? <>อ่านจากชีต <b>ข้อมูลรวม</b> — ได้เลข ว. ของแพทย์มาจากไฟล์โดยตรง ไม่ต้องเดาจากชื่อเล่น</>
+                  : <>ไฟล์นี้ไม่มีชีต <b>ข้อมูลรวม</b> ระบบจึงอ่านจากตารางปฏิทินและจับคู่ชื่อเล่นกับทะเบียนแพทย์ให้
+                    {parsed.withLic > 0 && <> (พบเลข ว. ในช่อง {parsed.withLic} เวร)</>}</>}
+              </Note>
               {parsed.ym !== scope.ym && (
                 <Note tone="warn">
                   ไฟล์นี้เป็นเดือน <b><YmLabel ym={parsed.ym} /></b> ไม่ตรงกับเดือนที่เลือกอยู่
@@ -203,13 +225,34 @@ export default function Roster({ scope }: { scope: Scope }) {
             </>
           )}
           {done && (
-            <Note tone="ok">
+            <Note tone={done.unmatched.length ? 'warn' : 'ok'}>
               บันทึก <b><YmLabel ym={done.ym} /></b> แล้ว {done.saved} เวร
               {done.removed > 0 && <> (แทนที่ของเดิม {done.removed} เวร)</>}
-              <br />จับคู่ทะเบียนแพทย์ได้ {done.matched} เวร · เจอในคลังรายชื่อ {done.pooled} เวร
+              {done.merged > 0 && (
+                <><br />มี {done.merged} วันที่ไฟล์เขียนไว้ 2 แถว (หมอเดิมยกเลิก + หมอลงแทน) —
+                  ระบบเก็บ<b>หมอที่มาจริง</b> แล้วบันทึกที่มาไว้ในหมายเหตุของวันนั้น</>
+              )}
+              <br />ได้เลข ว. จากไฟล์ {done.fromFileLic} เวร · ผูกกับทะเบียนแพทย์แล้ว {done.matched} เวร
+              {done.pooled > 0 && <> · อยู่ในคลังรายชื่อ {done.pooled} เวร</>}
+              {done.cancelled > 0 && <> · ยกเลิกไม่มีคนลงแทน {done.cancelled} เวร</>}
+              {done.registered > 0 && (
+                <><br />ขึ้นทะเบียนแพทย์ให้อัตโนมัติ <b>{done.registered} คน</b> —
+                  ตรวจชื่อ-สกุลและเลขบัญชีที่แท็บ <b>ทะเบียน</b> ก่อนจ่ายเงินรอบนี้</>
+              )}
+              {done.registered < 0 && (
+                <><br /><b>ขึ้นทะเบียนแพทย์อัตโนมัติไม่สำเร็จ</b> — ตารางบันทึกแล้ว
+                  แต่ต้องเพิ่มแพทย์ที่ยังไม่มีเองที่แท็บ <b>ทะเบียน</b></>
+              )}
               {done.unmatched.length > 0
-                ? <><br />ชื่อที่ยังไม่รู้จัก: {done.unmatched.map((u) => `${u.name} (${u.count})`).join(', ')}</>
-                : <><br />จับคู่ชื่อได้ครบทุกชื่อ</>}
+                ? <><br />ยังไม่มีในทะเบียนแพทย์: {done.unmatched.map((u) => `${u.name} (${u.count})`).join(', ')}</>
+                : <><br />ทุกเวรมีเลข ว. ครบ</>}
+              {done.mismatch.length > 0 && (
+                <><br /><span className="muted">
+                  ชื่อในไฟล์ไม่ตรงกับชื่อในทะเบียน (ใช้เลข ว. เป็นหลัก ควรตรวจ):{' '}
+                  {done.mismatch.slice(0, 6).map((m) => `ว.${m.licNo} ไฟล์="${m.file}" ทะเบียน="${m.registry}"`).join(' · ')}
+                  {done.mismatch.length > 6 && ` …อีก ${done.mismatch.length - 6} คน`}
+                </span></>
+              )}
             </Note>
           )}
         </Card>
@@ -255,9 +298,11 @@ export default function Roster({ scope }: { scope: Scope }) {
                 })}
               </div>
               <div className="legend" style={{ marginTop: 12 }}>
+                <span><b>ว.xxxxx</b> เลขใบประกอบวิชาชีพของแพทย์คนนั้น</span>
+                <span><b>✎</b> มีหมายเหตุ เช่น ลงแทนหมอคนอื่น</span>
                 <span><b>○</b> อยู่ในคลังรายชื่อแพทย์ ยังไม่ขึ้นทะเบียน</span>
-                <span><b>?</b> ยังไม่รู้จักชื่อนี้ในระบบ</span>
-                <span>ชี้ที่ชื่อเพื่อดูชื่อเต็มและเลข ว.</span>
+                <span><b>?</b> ยังไม่มีเลข ว. — ลงเวลาให้ไม่ได้</span>
+                <span>ชี้ที่ชื่อเพื่อดูชื่อเต็มและหมายเหตุ</span>
               </div>
             </>
           )}

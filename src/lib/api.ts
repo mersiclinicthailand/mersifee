@@ -86,6 +86,10 @@ export interface RosterRow {
   /** ไม่อยู่ในทะเบียน แต่เจอในคลังรายชื่อแพทย์ */
   poolLic: string;
   amGroup: string;
+  /** "ยืนยัน" = ขึ้นเวรจริง · "ยกเลิก" = เวรถูกยกเลิกและไม่มีคนลงแทน */
+  status: string;
+  /** ที่มาของการเปลี่ยนเวร เช่น "ลงแทนหมอหลี (เดิม: หมอหลี — หมอติดธุระ)" */
+  note: string;
 }
 export interface RosterMonth {
   ym: string;
@@ -95,8 +99,18 @@ export interface RosterMonth {
 }
 export interface RosterImportResult {
   ym: string; saved: number; removed: number; matched: number; pooled: number;
+  /** เวรที่ยกเลิกแล้วไม่มีคนลงแทน */
+  cancelled: number;
+  /** วันที่ไฟล์มี 2 แถว (ยกเลิก + คนลงแทน) แล้วระบบรวมให้เหลือแถวเดียว */
+  merged: number;
+  /** แถวที่ได้เลข ว. มาจากไฟล์ตรง ๆ (ไม่ต้องเดาจากชื่อ) */
+  fromFileLic: number;
+  /** แพทย์ที่ระบบขึ้นทะเบียนให้อัตโนมัติ (-1 = ขึ้นทะเบียนไม่สำเร็จ) */
+  registered: number;
   unmatched: { name: string; count: number }[];
   badBranch: { code: string; count: number }[];
+  /** ชื่อในไฟล์กับชื่อในทะเบียนไม่ตรงกัน — ไม่ใช่ข้อผิดพลาด แต่ควรตรวจ */
+  mismatch: { licNo: string; file: string; registry: string }[];
 }
 
 export interface SignView {

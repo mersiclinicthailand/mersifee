@@ -236,76 +236,189 @@ export function toShiftPayload(parsed: ShiftParsed) {
 }
 
 /* --------------------------- ตารางแพทย์ (ตารางเวร) ---------------------------
- * โครงไฟล์ "ตารางเวร-YYYY-MM.xlsx" ที่ฝ่ายบุคคลทำทุกเดือน:
- *   A1        = "ตารางเวร <เดือนไทย> <พ.ศ.>"
- *   แถว 2     = กลุ่ม Area Manager (ผสานเซลล์ — ค่าอยู่ที่คอลัมน์แรกของกลุ่ม)
- *   แถว 3     = หัวสาขา "BN\nบางนา"
- *   แถว 4+    = "1 พฤ" แล้วตามด้วยชื่อหมอของแต่ละสาขา
- * ช่องที่เขียนว่า "ไม่มีแพทย์" ไม่เก็บเป็นแถว
+ * ไฟล์ "ตารางเวร" ที่ฝ่ายบุคคลทำทุกเดือน อ่านได้ 2 แบบ เลือกให้อัตโนมัติ
+ *
+ * แบบที่ 1 (ดีที่สุด) — ชีต "ข้อมูลรวม": ตารางแบนที่มีเลขใบประกอบมาให้ครบ
+ *   วันที่ | กลุ่มดูแล | รหัสสาขา | ชื่อสาขา | ชื่อเล่นแพทย์ | เลขใบประกอบ | สถานะ | หมายเหตุ
+ *   1 แถว = 1 สาขา 1 วัน 1 คน · สถานะ "ยกเลิก" คือเวรที่ถูกยกเลิก (มักมีแถวคนลงแทนคู่กัน)
+ *
+ * แบบที่ 2 (ไฟล์รุ่นเก่า) — ชีตกริด:
+ *   A1 = "ตารางเวร <เดือนไทย> <พ.ศ.>" · แถว 2 = กลุ่ม Area Manager · แถว 3 = หัวสาขา "BN\nบางนา"
+ *   แถว 4+ = "1 พฤ" แล้วตามด้วยชื่อหมอ — ไฟล์รุ่นใหม่เขียน "หมอออย\nว.68896" จึงดึงเลข ว. ออกมาด้วย
+ *   ช่องที่เขียนว่า "ไม่มีแพทย์" ไม่เก็บเป็นแถว
  * ------------------------------------------------------------------------- */
 
+export interface RosterParsedRow {
+  workDate: string; branch: string; docLabel: string;
+  /** เลข ว. ที่ไฟล์ระบุมาตรง ๆ (ว่าง = ไฟล์ไม่ได้ให้มา ต้องให้ระบบจับคู่จากชื่อ) */
+  licNo: string;
+  amGroup: string;
+  /** "ยืนยัน" หรือ "ยกเลิก" — ไฟล์รุ่นเก่าไม่มีคอลัมน์นี้ ถือเป็น "ยืนยัน" */
+  status: string;
+  note: string;
+}
 export interface RosterParsed {
   ym: string;
   cols: { code: string; label: string; am: string }[];
   days: number;
-  rows: { workDate: string; branch: string; docLabel: string; amGroup: string }[];
+  rows: RosterParsedRow[];
+  /** อ่านมาจากชีตไหน — ใช้บอกผู้ใช้ว่าได้เลข ว. มาจากไฟล์หรือต้องจับคู่ชื่อเอง */
+  source: 'SUMMARY' | 'GRID';
+  withLic: number;
+  cancelled: number;
 }
 
 /** คำที่ไฟล์เขียนไม่ตรงกับรหัสสาขาในระบบ (v2 ใช้ RM ตาม CRM) */
 const ROSTER_BRANCH_FIX: Record<string, string> = { RM2: 'RM' };
 
+/** "ว.68896" · "68896" · 68896 → "68896" (ตัดคำนำหน้าและช่องว่างทิ้ง) */
+const licDigits = (v: unknown): string => {
+  const t = cellText(v).replace(/[\s ]/g, '');
+  const m = t.match(/(\d{4,})/);
+  return m ? m[1] : '';
+};
+
+/** ชื่อในไฟล์เขียนเป็นชื่อเล่นล้วน ("ออย") — เก็บให้อยู่ในรูปเดียวกับไฟล์กริด ("หมอออย") */
+const docLabelOf = (nick: string): string => {
+  const t = nick.trim();
+  if (!t) return '';
+  return /^(หมอ|นพ\.|พญ\.|น\.พ\.|พ\.ญ\.|ทพ\.|ทพญ\.)/.test(t) ? t : `หมอ${t}`;
+};
+
+/** หา index ของคอลัมน์จากข้อความหัวตาราง (ยอมให้สลับคอลัมน์หรือมีช่องว่างเกิน) */
+function headIndex(head: unknown[], ...names: string[]): number {
+  for (let c = 0; c < head.length; c++) {
+    const h = cellText(head[c]).replace(/\s+/g, '');
+    if (names.some((n) => h === n.replace(/\s+/g, ''))) return c;
+  }
+  return -1;
+}
+
 export async function parseRosterFile(file: File): Promise<RosterParsed> {
   const { XLSX, wb } = await readWorkbook(file);
-  const name = wb.SheetNames.find((n) => /ตารางเวร/.test(n)) || wb.SheetNames[0];
-  const aoa = XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets[name], {
+  const sumName = wb.SheetNames.find((n) => /ข้อมูลรวม/.test(n));
+  const gridName = wb.SheetNames.find((n) => /ตารางเวร/.test(n)) || wb.SheetNames[0];
+  const aoaOf = (n: string) => XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets[n], {
     header: 1, raw: true, defval: null, blankrows: true,
   });
 
-  const title = cellText((aoa[0] || [])[0]);
-  let ym = '';
+  /* ---- หัวสาขา/กลุ่ม AM อ่านจากชีตกริดเสมอ (ชีตข้อมูลรวมไม่ได้เรียงสาขาไว้) ---- */
+  const grid = wb.Sheets[gridName] ? aoaOf(gridName) : [];
+  const gridTitle = cellText((grid[0] || [])[0]);
+  let ymTitle = '';
   for (let i = 0; i < 12; i++) {
-    if (title.includes(TH_MONTHS_FULL[i])) {
-      const y = (title.match(/(\d{4})/) || [])[1];
-      if (y) ym = `${Number(y) - 543}-${pad2(i + 1)}`;
+    if (gridTitle.includes(TH_MONTHS_FULL[i])) {
+      const y = (gridTitle.match(/(\d{4})/) || [])[1];
+      if (y) ymTitle = `${Number(y) - 543}-${pad2(i + 1)}`;
       break;
     }
   }
-  if (!ym) {
-    throw new Error('อ่านเดือนจากหัวตารางไม่ได้ — ช่อง A1 ต้องเป็นเช่น "ตารางเวร ตุลาคม 2569"');
-  }
-
-  const am = (aoa[1] || []) as unknown[];
-  const head = (aoa[2] || []) as unknown[];
+  const amRow = (grid[1] || []) as unknown[];
+  const headRow = (grid[2] || []) as unknown[];
   const cols: { c: number; code: string; label: string; am: string }[] = [];
   let curAm = '';
-  for (let c = 1; c < head.length; c++) {
-    const h = cellText(head[c]);
+  for (let c = 1; c < headRow.length; c++) {
+    const h = cellText(headRow[c]);
     if (!h) continue;
-    if (cellText(am[c])) curAm = cellText(am[c]);
+    if (cellText(amRow[c])) curAm = cellText(amRow[c]);
     const raw = h.split(/[\n\r]/)[0].trim().toUpperCase();
     cols.push({ c, code: ROSTER_BRANCH_FIX[raw] || raw, label: h.replace(/[\n\r]+/g, ' ').trim(), am: curAm });
   }
-  if (!cols.length) throw new Error('ไม่พบหัวสาขาในแถวที่ 3 ของไฟล์');
 
-  const rows: RosterParsed['rows'] = [];
+  const rows: RosterParsedRow[] = [];
   const days = new Set<string>();
-  for (let r = 3; r < aoa.length; r++) {
-    const a = (aoa[r] || []) as unknown[];
-    const dtxt = cellText(a[0]);
-    if (!dtxt) continue;
-    const m = dtxt.match(/\d+/);
-    if (!m) continue;
-    const d = Number(m[0]);
-    if (!d || d > 31) continue;
-    const iso = `${ym}-${pad2(d)}`;
-    days.add(iso);
-    cols.forEach((col) => {
-      const v = cellText(a[col.c]);
-      if (!v || v === 'ไม่มีแพทย์' || v === '-') return;
-      rows.push({ workDate: iso, branch: col.code, docLabel: v, amGroup: col.am });
-    });
-  }
-  if (!rows.length) throw new Error('ไม่พบเวรในไฟล์ — ตรวจว่าวันที่เริ่มที่แถว 4 และมีชื่อแพทย์ในตาราง');
+  let source: RosterParsed['source'] = 'GRID';
+  let ym = ymTitle;
 
-  return { ym, cols: cols.map(({ code, label, am: g }) => ({ code, label, am: g })), days: days.size, rows };
+  if (sumName) {
+    /* ------------------------------ ชีต "ข้อมูลรวม" ------------------------------ */
+    source = 'SUMMARY';
+    const aoa = aoaOf(sumName);
+    const head = (aoa[0] || []) as unknown[];
+    const iDate = headIndex(head, 'วันที่');
+    const iAm = headIndex(head, 'กลุ่มดูแล', 'กลุ่ม');
+    const iCode = headIndex(head, 'รหัสสาขา', 'สาขา');
+    const iNick = headIndex(head, 'ชื่อเล่นแพทย์', 'ชื่อแพทย์', 'ชื่อเล่น');
+    const iLic = headIndex(head, 'เลขใบประกอบ', 'เลข ว.', 'เลขว.', 'licNo');
+    const iSt = headIndex(head, 'สถานะ');
+    const iNote = headIndex(head, 'หมายเหตุ');
+    if (iDate < 0 || iCode < 0 || iNick < 0) {
+      throw new Error('ชีต "ข้อมูลรวม" ต้องมีคอลัมน์ วันที่ · รหัสสาขา · ชื่อเล่นแพทย์');
+    }
+    const ymCount = new Map<string, number>();
+    for (let r = 1; r < aoa.length; r++) {
+      const a = (aoa[r] || []) as unknown[];
+      const iso = toIsoDate(a[iDate]);
+      const code0 = cellText(a[iCode]).trim().toUpperCase();
+      const nick = cellText(a[iNick]).trim();
+      if (!iso || !code0 || !nick) continue;
+      const branch = ROSTER_BRANCH_FIX[code0] || code0;
+      const key = iso.substring(0, 7);
+      ymCount.set(key, (ymCount.get(key) || 0) + 1);
+      days.add(iso);
+      rows.push({
+        workDate: iso,
+        branch,
+        docLabel: docLabelOf(nick),
+        licNo: iLic >= 0 ? licDigits(a[iLic]) : '',
+        amGroup: iAm >= 0 ? cellText(a[iAm]).trim() : (cols.find((c) => c.code === branch)?.am || ''),
+        status: iSt >= 0 ? (cellText(a[iSt]).trim() || 'ยืนยัน') : 'ยืนยัน',
+        note: iNote >= 0 ? cellText(a[iNote]).trim() : '',
+      });
+    }
+    if (!ym) {
+      // ไม่มีหัวตารางให้อ่าน — ใช้เดือนที่พบมากที่สุดในข้อมูล
+      let best = ''; let n = 0;
+      ymCount.forEach((v, k) => { if (v > n) { n = v; best = k; } });
+      ym = best;
+    }
+    if (!ym) throw new Error('อ่านเดือนจากไฟล์ไม่ได้ — ตรวจคอลัมน์ "วันที่" ในชีต "ข้อมูลรวม"');
+    // กันข้อมูลเดือนอื่นหลุดเข้ามาปนในไฟล์เดียวกัน
+    for (let i = rows.length - 1; i >= 0; i--) {
+      if (rows[i].workDate.substring(0, 7) !== ym) rows.splice(i, 1);
+    }
+  } else {
+    /* -------------------------------- ชีตกริด -------------------------------- */
+    if (!ym) {
+      throw new Error('อ่านเดือนจากหัวตารางไม่ได้ — ช่อง A1 ต้องเป็นเช่น "ตารางเวร ตุลาคม 2569"');
+    }
+    if (!cols.length) throw new Error('ไม่พบหัวสาขาในแถวที่ 3 ของไฟล์');
+    for (let r = 3; r < grid.length; r++) {
+      const a = (grid[r] || []) as unknown[];
+      const dtxt = cellText(a[0]);
+      if (!dtxt) continue;
+      const m = dtxt.match(/\d+/);
+      if (!m) continue;
+      const d = Number(m[0]);
+      if (!d || d > 31) continue;
+      const iso = `${ym}-${pad2(d)}`;
+      days.add(iso);
+      cols.forEach((col) => {
+        const v = cellText(a[col.c]);
+        if (!v || v === 'ไม่มีแพทย์' || v === '-') return;
+        // ไฟล์รุ่นใหม่เขียนเลข ว. ไว้บรรทัดที่สองของช่อง
+        const parts = v.split(/[\n\r]+/).map((t) => t.trim()).filter(Boolean);
+        const label = parts[0] || v;
+        const lic = parts.slice(1).map(licDigits).find(Boolean) || '';
+        rows.push({
+          workDate: iso, branch: col.code, docLabel: label,
+          licNo: lic, amGroup: col.am, status: 'ยืนยัน', note: '',
+        });
+      });
+    }
+  }
+
+  if (!rows.length) {
+    throw new Error('ไม่พบเวรในไฟล์ — ตรวจว่ามีชีต "ข้อมูลรวม" หรือชีตตารางเวรที่วันที่เริ่มแถว 4');
+  }
+
+  return {
+    ym,
+    cols: cols.map(({ code, label, am: g }) => ({ code, label, am: g })),
+    days: days.size,
+    rows,
+    source,
+    withLic: rows.filter((r) => r.licNo).length,
+    cancelled: rows.filter((r) => r.status === 'ยกเลิก').length,
+  };
 }

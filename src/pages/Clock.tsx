@@ -38,64 +38,68 @@ export default function Clock({ scope }: { scope: Scope }) {
   };
   useEffect(load, [scope.branch, scope.ym]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /* ตารางแพทย์ของเดือนนี้ — ใช้กำหนดว่าใครควรอยู่เวรสาขานี้ (แคชตามเดือน สลับสาขาไม่ยิงซ้ำ) */
+  /* ตารางแพทย์ของ "เดือนที่วันนี้อยู่" — กระดานลงเวลาเป็นของวันนี้เสมอ
+     ไม่ผูกกับเดือนที่เลือกดู (แคชตามเดือน สลับสาขาไม่ยิงซ้ำ) */
+  const todayYm = todayIso().substring(0, 7);
   useEffect(() => {
     setRoster(null);
-    api.roster(scope.ym).then(setRoster).catch(() => setRoster({ ym: scope.ym, rows: [], names: {} }));
-  }, [scope.ym]);
+    api.roster(todayYm).then(setRoster).catch(() => setRoster({ ym: todayYm, rows: [], names: {} }));
+  }, [todayYm]);
 
   const status = ws?.period?.status || 'NONE';
   const locked = ['APPROVED', 'PAID'].includes(status);
   const today = todayIso();
   const myLic = boot?.me.licNo;
 
-  /** ตารางแพทย์เฉพาะสาขานี้ในเดือนนี้ — เป็นตัวกำหนดว่าใครควรมาลงเวลาที่สาขานี้ */
-  const rosterHere = useMemo(
-    () => (roster?.rows || []).filter((r) => r.branch === scope.branch),
-    [roster, scope.branch],
+  /** เวรตามตารางของ "สาขานี้ วันนี้" — ตัวกำหนดว่ากระดานลงเวลาจะมีใครบ้าง
+   *  ตารางแพทย์เก็บ 1 สาขา 1 วัน 1 แถว แต่เขียนเผื่อไว้เป็นหลายแถวได้ */
+  const todayPlans = useMemo(
+    () => (roster?.rows || []).filter((r) => r.branch === scope.branch && r.workDate === today),
+    [roster, scope.branch, today],
   );
-  /** เวรตามตารางของ "วันนี้" (ถ้าเดือนที่เลือกคือเดือนปัจจุบัน) */
-  const todayPlan = useMemo(
-    () => rosterHere.find((r) => r.workDate === today),
-    [rosterHere, today],
-  );
-  /** เลข ว. ที่อยู่ในตารางสาขานี้ทั้งเดือน (เฉพาะชื่อที่จับคู่ทะเบียนแพทย์ได้) */
+  /** เวรที่ยกเลิกแล้วไม่มีคนลงแทน — ไม่นับเป็นคนที่ต้องมาลงเวลา แต่ต้องแจ้งให้เห็น */
+  const cancelled = useMemo(() => todayPlans.filter((r) => r.status === 'ยกเลิก'), [todayPlans]);
+  const activePlans = useMemo(() => todayPlans.filter((r) => r.status !== 'ยกเลิก'), [todayPlans]);
+  /** เลข ว. ของแพทย์ที่มีเวรวันนี้ที่สาขานี้ */
   const planLics = useMemo(
-    () => new Set(rosterHere.map((r) => r.licNo).filter(Boolean)),
-    [rosterHere],
+    () => new Set(activePlans.map((r) => r.licNo).filter(Boolean)),
+    [activePlans],
   );
-  /** ชื่อในตารางที่ยังจับคู่ทะเบียนแพทย์ไม่ได้ → ลงเวลาให้ไม่ได้ ต้องบอกให้รู้ */
-  const planUnknown = useMemo(() => {
-    const seen = new Set<string>();
-    rosterHere.forEach((r) => { if (!r.licNo) seen.add(r.docLabel); });
-    return [...seen];
-  }, [rosterHere]);
+  /** มีเวรวันนี้ แต่ยังไม่มีเลข ว. ในระบบ → ลงเวลาให้ไม่ได้ ต้องบอกให้รู้ */
+  const planUnknown = useMemo(
+    () => activePlans.filter((r) => !r.licNo).map((r) => r.docLabel),
+    [activePlans],
+  );
 
-  /** แพทย์ที่มีใบเวรของสาขานี้อยู่แล้ว (เผื่อคนที่ลงเวลาไว้แต่ไม่อยู่ในตาราง) */
-  const onDuty = useMemo(
-    () => new Set((ws?.shifts || []).map((s) => cellStr(s.licNo)).filter(Boolean)),
-    [ws],
-  );
-  /** ยังไม่มีทั้งตารางแพทย์และใบเวลาของสาขานี้ → โชว์ทั้งทะเบียนไปก่อน ไม่งั้นลงเวลาไม่ได้เลย */
-  const noPlan = planLics.size === 0;
-  const noRoster = noPlan && onDuty.size === 0;
+  /** แพทย์ที่มีใบเวลาของ "วันนี้" อยู่แล้ว — คนที่ถูกเพิ่มหรือแก้ไขด้วยมือต้องคงอยู่บนกระดาน */
+  const onDuty = useMemo(() => new Set(
+    (ws?.shifts || [])
+      .filter((s) => toIsoDate(s.workDate) === today)
+      .map((s) => cellStr(s.licNo)).filter(Boolean),
+  ), [ws, today]);
+
+  /** ไม่มีทั้งเวรตามตารางและใบเวลาของวันนี้ → เปิดให้เลือกจากทะเบียนทั้งหมด
+   *  (เช่น สาขายังไม่ได้นำเข้าตาราง หรือมีหมอมาแทนกะทันหัน) */
+  const onBoard = planLics.size + onDuty.size;
+  const noRoster = (roster?.rows || []).length === 0;
   const [showAll, setShowAll] = useState(false);
+  const viewingToday = scope.ym === today.substring(0, 7);
 
   const docs = useMemo(() => {
     const list = (ws?.doctors || []).filter((d) => {
-      if (myLic) return d.licNo === myLic;                       // บัญชีแพทย์เห็นเฉพาะตัวเอง
-      if (showAll || noRoster) return true;                      // กดดูทั้งทะเบียน / ยังไม่มีข้อมูลอะไรเลย
-      if (!noPlan) return planLics.has(d.licNo || '') || onDuty.has(d.licNo || '');
-      return onDuty.has(d.licNo || '');                          // ไม่มีตาราง → ใช้ใบเวรเดิม
+      if (myLic) return d.licNo === myLic;                 // บัญชีแพทย์เห็นเฉพาะตัวเอง
+      if (showAll) return true;                            // กดขอดูทั้งทะเบียน
+      const lic = d.licNo || '';
+      return planLics.has(lic) || onDuty.has(lic);         // มีเวรวันนี้ หรือถูกเพิ่ม/แก้ไขไว้แล้ว
     });
     // คนที่อยู่เวรตามตารางวันนี้ ขึ้นก่อนเสมอ
     return list.sort((a, b) => {
-      const at = a.licNo === todayPlan?.licNo ? 0 : 1;
-      const bt = b.licNo === todayPlan?.licNo ? 0 : 1;
+      const at = planLics.has(a.licNo || '') ? 0 : 1;
+      const bt = planLics.has(b.licNo || '') ? 0 : 1;
       if (at !== bt) return at - bt;
       return (a.nickName || a.fullName || '').localeCompare(b.nickName || b.fullName || '', 'th');
     });
-  }, [ws, myLic, onDuty, showAll, noRoster, noPlan, planLics, todayPlan]);
+  }, [ws, myLic, onDuty, showAll, planLics]);
 
   /** สถานะวันนี้ของแพทย์แต่ละคน: ยังไม่เข้า / อยู่ในเวร / ออกแล้ว */
   const board = useMemo(() => docs.map((d) => {
@@ -186,36 +190,51 @@ export default function Clock({ scope }: { scope: Scope }) {
         {!myLic && (
           <>
             <div className="row" style={{ marginBottom: 8 }}>
-              {scope.ym !== today.substring(0, 7) ? (
-                <span className="pill none">
-                  กำลังดูเดือนอื่น — ปุ่มลงเวลาใช้กับวันนี้เท่านั้น
-                </span>
-              ) : todayPlan ? (
+              {activePlans.length > 0 ? (
                 <span className="pill ok">
-                  ตารางแพทย์วันนี้ · {scope.branch} = {todayPlan.docLabel}
-                  {!todayPlan.licNo && ' (ยังไม่มีในทะเบียนแพทย์)'}
+                  เวรวันนี้ · {scope.branch} = {activePlans.map((r) => r.docLabel).join(' · ')}
                 </span>
-              ) : !noPlan ? (
-                <span className="pill none">ตารางแพทย์วันนี้ · {scope.branch} = ไม่มีแพทย์</span>
-              ) : (
+              ) : noRoster ? (
                 <span className="pill warn">
-                  ยังไม่มีตารางแพทย์ของสาขานี้ในเดือนนี้ — นำเข้าที่แท็บ “ตารางแพทย์”
+                  ยังไม่มีตารางแพทย์ของเดือนนี้ — นำเข้าที่แท็บ “ตารางแพทย์”
                 </span>
+              ) : cancelled.length > 0 ? (
+                <span className="pill warn">
+                  เวรวันนี้ · {scope.branch} = ยกเลิก ({cancelled.map((r) => r.docLabel).join(' · ')})
+                </span>
+              ) : (
+                <span className="pill none">ตารางแพทย์วันนี้ · {scope.branch} = ไม่มีแพทย์</span>
               )}
-              {!noPlan && (
-                <span className="pill none">อยู่ในตารางเดือนนี้ {planLics.size} คน</span>
+              {onDuty.size > 0 && planLics.size < onDuty.size && (
+                <span className="pill rev">มีคนลงเวลานอกตาราง {onDuty.size - planLics.size} คน</span>
+              )}
+              {!viewingToday && (
+                <span className="pill none">
+                  กระดานนี้เป็นของวันนี้เสมอ (เดือนที่เลือกดูมีผลกับตารางด้านล่าง)
+                </span>
               )}
               <div className="spacer" />
               <label className="muted" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <input type="checkbox" checked={showAll}
                   onChange={(e) => setShowAll(e.target.checked)}
                 />
-                แสดงแพทย์ทุกคนในทะเบียน (กรณีมีหมอมาแทนเวรกะทันหัน)
+                เพิ่มแพทย์นอกตาราง (หมอมาแทนเวรกะทันหัน)
               </label>
             </div>
+            {cancelled.length > 0 && activePlans.length > 0 && (
+              <Note tone="info">
+                วันนี้มีการเปลี่ยนเวร: <b>{cancelled.map((r) => r.docLabel).join(' · ')}</b> ยกเลิก
+                {cancelled.some((r) => r.note) && <> ({cancelled.map((r) => r.note).filter(Boolean).join(' · ')})</>}
+              </Note>
+            )}
+            {activePlans.some((r) => r.note) && (
+              <Note tone="info">
+                หมายเหตุเวรวันนี้: {activePlans.map((r) => r.note).filter(Boolean).join(' · ')}
+              </Note>
+            )}
             {planUnknown.length > 0 && (
               <Note tone="warn">
-                ชื่อในตารางแพทย์ของสาขานี้ที่ยังไม่มีในทะเบียนแพทย์: <b>{planUnknown.join(' · ')}</b>
+                แพทย์ที่มีเวรวันนี้แต่ยังไม่มีในทะเบียนแพทย์: <b>{planUnknown.join(' · ')}</b>
                 {' '}— ลงเวลาให้ยังไม่ได้ ต้องเพิ่มเข้าทะเบียนแพทย์ (แท็บ “ทะเบียน”) ก่อน
               </Note>
             )}
@@ -225,14 +244,14 @@ export default function Clock({ scope }: { scope: Scope }) {
           <div className="grid g3">
             {board.map(({ doc, open, done }) => (
               <div key={doc.licNo} className="stat"
-                style={doc.licNo === todayPlan?.licNo
+                style={planLics.has(doc.licNo || '')
                   ? { borderColor: 'var(--sage)', boxShadow: '0 0 0 2px var(--sage-lt) inset' } : undefined}
               >
                 <div className="k">
-                  {doc.licNo}
-                  {doc.licNo === todayPlan?.licNo && (
-                    <span className="pill ok" style={{ marginLeft: 6 }}>เวรวันนี้</span>
-                  )}
+                  ว.{doc.licNo}
+                  {planLics.has(doc.licNo || '')
+                    ? <span className="pill ok" style={{ marginLeft: 6 }}>เวรวันนี้</span>
+                    : <span className="pill none" style={{ marginLeft: 6 }}>นอกตาราง</span>}
                 </div>
                 <div style={{ fontWeight: 600 }}>{doc.nickName || doc.fullName}</div>
                 <div className="s" style={{ marginBottom: 8 }}>
@@ -265,11 +284,15 @@ export default function Clock({ scope }: { scope: Scope }) {
             ))}
             {board.length === 0 && (
               <p className="muted">
-                {noRoster
+                {(ws?.doctors || []).length === 0
                   ? 'ยังไม่มีแพทย์ในทะเบียน — เพิ่มที่แท็บ “ทะเบียน” ก่อน'
-                  : noPlan
-                    ? 'ยังไม่มีตารางแพทย์ของสาขานี้ในเดือนนี้ และยังไม่มีใบเวร — นำเข้าตารางที่แท็บ “ตารางแพทย์” หรือติ๊ก “แสดงแพทย์ทุกคน” ด้านบน'
-                    : 'ชื่อในตารางแพทย์ของสาขานี้ยังจับคู่กับทะเบียนแพทย์ไม่ได้ — ติ๊ก “แสดงแพทย์ทุกคน” ด้านบนเพื่อลงเวลาชั่วคราว'}
+                  : noRoster
+                    ? 'ยังไม่มีตารางแพทย์ของเดือนนี้ — นำเข้าที่แท็บ “ตารางแพทย์” หรือติ๊ก “เพิ่มแพทย์นอกตาราง” ด้านบน'
+                    : cancelled.length > 0
+                      ? 'เวรวันนี้ของสาขานี้ถูกยกเลิก และยังไม่มีใครลงเวลา — ถ้ามีหมอมาแทน ให้ติ๊ก “เพิ่มแพทย์นอกตาราง” ด้านบน'
+                      : onBoard === 0 && planUnknown.length === 0
+                        ? `วันนี้สาขา ${scope.branch} ไม่มีแพทย์ตามตาราง — ถ้ามีหมอมาลงเวร ให้ติ๊ก “เพิ่มแพทย์นอกตาราง” ด้านบน`
+                        : 'แพทย์ที่มีเวรวันนี้ยังไม่มีในทะเบียนแพทย์ — ติ๊ก “เพิ่มแพทย์นอกตาราง” ด้านบนเพื่อลงเวลาชั่วคราว'}
               </p>
             )}
           </div>
