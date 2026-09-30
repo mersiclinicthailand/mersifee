@@ -5,6 +5,7 @@ import { useAuth } from '../lib/auth';
 import {
   Alerts, BranchMonthPicker, Card, Money, Note, Skeleton, StatusPill, useAsync, YmLabel,
 } from '../components/ui';
+import { docNick } from '../lib/names';
 
 const thTime = (s: string | null) =>
   (s ? s.replace('T', ' ').substring(0, 16) : '—');
@@ -32,7 +33,7 @@ export default function EmailPage({ scope }: { scope: Scope }) {
     return n;
   });
 
-  const send = (action: 'sign_invite' | 'tax_detail') => run(async () => {
+  const send = (action: 'sign_invite') => run(async () => {
     const licNos = [...picked];
     if (!licNos.length) { setErr('ยังไม่ได้เลือกแพทย์'); return; }
     const r = await api.sendMail(action, scope.branch, scope.ym, licNos);
@@ -100,7 +101,7 @@ export default function EmailPage({ scope }: { scope: Scope }) {
                             onChange={() => toggle(r.licNo)}
                           />
                         </td>
-                        <td>{r.licNo} · {r.nick || r.name}</td>
+                        <td>{r.licNo} · {docNick(r.nick) || r.name}</td>
                         <td>
                           {r.email
                             ? <span className="muted">{r.email}</span>
@@ -140,15 +141,11 @@ export default function EmailPage({ scope }: { scope: Scope }) {
               >
                 ส่งเมลเชิญเซ็นรับรองรายได้ ({picked.size})
               </button>
-              <button disabled={busy || !approved || !picked.size}
-                onClick={() => send('tax_detail')}
-              >
-                ส่งเมลรายละเอียดหักภาษี ({picked.size})
-              </button>
             </div>
             <p className="muted" style={{ marginBottom: 0 }}>
               เมลเชิญเซ็นจะแนบลิงก์เฉพาะตัวของแพทย์แต่ละคน อายุ 14 วัน กดเซ็นได้เลยไม่ต้องล็อกอิน ·
-              เมลรายละเอียดภาษีส่งเมื่อไรก็ได้หลังอนุมัติ · ทุกฉบับถูกบันทึกไว้ตรวจย้อนกลับได้
+              ทุกฉบับถูกบันทึกไว้ตรวจย้อนกลับได้ · เมลเรื่องภาษีและ 50 ทวิ ย้ายไปที่แท็บ
+              <b> ส่งเมลหัก ณ ที่จ่าย</b> (ฝ่ายบัญชี)
             </p>
           </Card>
         </>

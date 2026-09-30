@@ -15,6 +15,7 @@ const Calc      = lazy(() => import('./pages/Calc'));
 const Reconcile = lazy(() => import('./pages/Reconcile'));
 const Approve   = lazy(() => import('./pages/Approve'));
 const EmailPage = lazy(() => import('./pages/Email'));
+const Wht       = lazy(() => import('./pages/Wht'));
 const Registry  = lazy(() => import('./pages/Registry'));
 const Settings  = lazy(() => import('./pages/Settings'));
 const Sign      = lazy(() => import('./pages/Sign'));
@@ -110,6 +111,7 @@ export default function App() {
             <Route path="/reconcile" element={guard('/reconcile', <Reconcile scope={scope} />)} />
             <Route path="/approve"   element={guard('/approve', <Approve scope={scope} />)} />
             <Route path="/email"     element={guard('/email', <EmailPage scope={scope} />)} />
+            <Route path="/wht"       element={guard('/wht', <Wht scope={scope} />)} />
             <Route path="/registry"  element={guard('/registry', <Registry />)} />
             <Route path="/settings"  element={guard('/settings', <Settings />)} />
             <Route path="*"          element={<Navigate to="/" replace />} />

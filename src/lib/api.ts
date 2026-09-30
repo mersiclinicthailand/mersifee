@@ -327,9 +327,12 @@ export const api = {
   emailTargets: (branch: string, ym: string) =>
     rpc<MailTargets>('fee_email_targets', { p_branch: branch, p_ym: ym }),
 
-  async sendMail(action: 'sign_invite' | 'tax_detail', branch: string, ym: string, licNos: string[]) {
+  async sendMail(
+    action: 'sign_invite' | 'tax_detail' | 'wht_cert', branch: string, ym: string, licNos: string[],
+    extra?: { attachments?: Record<string, { filename: string; content: string }>; note?: string },
+  ) {
     const { data, error } = await supabase.functions.invoke('fee-send-email', {
-      body: { action, branch, ym, licNos },
+      body: { action, branch, ym, licNos, ...(extra || {}) },
     });
     if (error) {
       let detail = '';
@@ -341,6 +344,7 @@ export const api = {
     return data as {
       ok: true; sent: number; total: number;
       results: { licNo: string; ok: boolean; error?: string }[];
+      logError?: string;
     };
   },
 

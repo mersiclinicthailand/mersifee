@@ -7,6 +7,7 @@ import { cellStr, minutesToHHMM, toIsoDate, toThaiDate, toMinutes } from '../lib
 import {
   Alerts, BranchMonthPicker, Card, Note, SignaturePad, Skeleton, StatusPill, useAsync, YmLabel,
 } from '../components/ui';
+import { docNick } from '../lib/names';
 
 /** เวลาที่บันทึกคือเวลาของเครื่องที่เปิดหน้าจอ แต่แสดงตามเขตเวลาไทยเสมอ */
 function nowHHMM() {
@@ -253,7 +254,7 @@ export default function Clock({ scope }: { scope: Scope }) {
                     ? <span className="pill ok" style={{ marginLeft: 6 }}>เวรวันนี้</span>
                     : <span className="pill none" style={{ marginLeft: 6 }}>นอกตาราง</span>}
                 </div>
-                <div style={{ fontWeight: 600 }}>{doc.nickName || doc.fullName}</div>
+                <div style={{ fontWeight: 600 }}>{docNick(doc.nickName) || doc.fullName}</div>
                 <div className="s" style={{ marginBottom: 8 }}>
                   {open ? (
                     <span className="pill rev">อยู่ในเวร · เข้า {cellStr(open.timeIn)} น.</span>
@@ -323,7 +324,7 @@ export default function Clock({ scope }: { scope: Scope }) {
                   return (
                     <React.Fragment key={d.licNo}>
                       <tr>
-                        <td>{d.licNo} · {d.nickName || d.fullName}</td>
+                        <td>{d.licNo} · {docNick(d.nickName) || d.fullName}</td>
                         <td className="n">{mine.length}</td>
                         <td><span className={`pill ${cls}`}>{txt}</span></td>
                         <td className="muted">{(st.signedAt || '').replace('T', ' ').substring(0, 16) || '—'}</td>

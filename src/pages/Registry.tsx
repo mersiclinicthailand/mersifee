@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api, type PoolRow, type PoolSearch } from '../lib/api';
 import { useAuth, can } from '../lib/auth';
 import { Alerts, Card, Money, Note, Skeleton, useAsync } from '../components/ui';
+import { docNick, rawNick } from '../lib/names';
 
 interface Doctor {
   lic_no: string; full_name: string; nick_name: string; bank: string; bank_acc: string;
@@ -89,7 +90,7 @@ export default function Registry() {
     if (!editDoc.lic_no.trim() || !editDoc.full_name.trim()) {
       throw new Error('ต้องระบุรหัส ว. และชื่อ-สกุล');
     }
-    await api.saveDoctor({ ...editDoc, lic_no: editDoc.lic_no.trim() });
+    await api.saveDoctor({ ...editDoc, lic_no: editDoc.lic_no.trim(), nick_name: rawNick(editDoc.nick_name) });
     setEditDoc(null); load();
     setMsg('บันทึกทะเบียนแพทย์แล้ว');
   });
@@ -147,7 +148,7 @@ export default function Registry() {
                     <tr key={d.lic_no}>
                       <td>{d.lic_no}</td>
                       <td>{d.full_name}</td>
-                      <td>{d.nick_name}</td>
+                      <td>{docNick(d.nick_name)}</td>
                       <td>{d.bank}</td>
                       <td className="tnum">{d.bank_acc}</td>
                       <td>
@@ -244,7 +245,7 @@ export default function Registry() {
                         </td>
                         <td>{r.licNo}</td>
                         <td>{r.name}</td>
-                        <td>{r.nick}</td>
+                        <td>{docNick(r.nick)}</td>
                         <td>{r.bank}</td>
                         <td className="tnum">{r.bankAcc}</td>
                         <td>

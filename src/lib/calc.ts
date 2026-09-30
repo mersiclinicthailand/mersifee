@@ -15,6 +15,7 @@ import {
   cellStr, num, r2, toIsoDate, toThaiDate, toMinutes, minutesToHHMM, fmtMoney, hash,
   MAX_SHIFT_MINUTES, TAX_BASE_DEFAULT, TAX_RATE_DEFAULT,
 } from './core';
+import { docNick } from './names';
 
 /* ---------------------------- ชนิดข้อมูล ---------------------------- */
 
@@ -511,9 +512,9 @@ export function calcCore(ctx: CalcCtx): CalcResult {
       sign = signStatus(ctx.signs, lic, shifts);
       if (signMode !== 'OFF') {
         const sev: Severity = signMode === 'BLOCK' ? 'block' : 'warn';
-        if (sign.status === 'NONE') issue('NO_DOCTOR_SIGN', lic, cellStr(d.nickName || d.fullName || lic), lic, sev);
+        if (sign.status === 'NONE') issue('NO_DOCTOR_SIGN', lic, (docNick(cellStr(d.nickName)) || cellStr(d.fullName) || lic), lic, sev);
         if (sign.status === 'STALE') {
-          issue('SIGN_STALE', lic, cellStr(d.nickName || d.fullName || lic) +
+          issue('SIGN_STALE', lic, (docNick(cellStr(d.nickName)) || cellStr(d.fullName) || lic) +
             ' (เซ็นเมื่อ ' + sign.signedAt + ')', lic, sev);
         }
       }
@@ -523,7 +524,7 @@ export function calcCore(ctx: CalcCtx): CalcResult {
       sign,
       signedRows: rows.filter((r) => r.signed).length,
       licNo: lic,
-      fullName: cellStr(d.fullName), nickName: cellStr(d.nickName),
+      fullName: cellStr(d.fullName), nickName: docNick(cellStr(d.nickName)),
       bank: cellStr(d.bank), bankAcc: cellStr(d.bankAcc), idCard: cellStr(d.idCard),
       address: cellStr(d.address), contact: cellStr(d.contact),
       payeeType: cellStr(d.payeeType) || 'PERSON', payeeName: cellStr(d.payeeName),

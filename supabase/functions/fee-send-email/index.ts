@@ -1,9 +1,14 @@
 // fee-send-email — ส่งอีเมลหาแพทย์ผ่าน Resend
-//   sign_invite : เชิญแพทย์กดลิงก์เซ็นรับรองรายได้ (ลิงก์มีอายุ 14 วัน)
-//   tax_detail  : แจ้งรายละเอียดการหักภาษี ณ ที่จ่าย (HR กดส่งเองเมื่อพร้อม)
+//   sign_invite : เชิญแพทย์กดลิงก์เซ็นรับรองรายได้ (ลิงก์มีอายุ 14 วัน)      — admin · hr
+//   tax_detail  : สรุปยอดหักภาษี ณ ที่จ่ายของเดือน                          — admin · hr · acct
+//   wht_cert    : ส่งหนังสือรับรองการหักภาษี ณ ที่จ่าย (50 ทวิ) แนบ PDF     — admin · hr · acct
 //
-// เรียกได้เฉพาะบัญชี hr หรือ admin และเฉพาะรอบที่อนุมัติแล้วเท่านั้น
-// ต้องตั้ง secret ที่ Supabase ก่อนใช้งาน: RESEND_API_KEY, FEE_MAIL_FROM, FEE_APP_URL
+// ส่งได้เฉพาะรอบที่อนุมัติแล้ว · ต้องตั้ง secret: RESEND_API_KEY, FEE_MAIL_FROM, FEE_APP_URL
+//
+// หมายเหตุสำคัญ: ตารางในสคีมา fee เปิด FORCE ROW LEVEL SECURITY
+//   กุญแจ service role จึง "อ่านไม่เห็นแถว" — ทุกงานที่แตะตารางต้องผ่าน RPC
+//   (fee_mail_prepare / fee_mail_token / fee_mail_record ใน supabase/mail_rpc.sql)
+//   ที่เรียกด้วย token ของคนที่กดส่ง ระบบจะตรวจสิทธิ์จาก auth.uid() ของคนนั้นเอง
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.4';
 
 const CORS = {
@@ -63,12 +68,6 @@ Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS });
   if (req.method !== 'POST') return json({ error: 'ต้องเรียกด้วย POST' }, 405);
 
-  const admin = createClient(
-    Deno.env.get('SUPABASE_URL')!,
-    Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
-    { auth: { persistSession: false } },
-  );
-
   const apiKey = Deno.env.get('RESEND_API_KEY');
   const from = Deno.env.get('FEE_MAIL_FROM') || 'Mersi Clinic <onboarding@resend.dev>';
   const appUrl = (Deno.env.get('FEE_APP_URL') || '').replace(/\/+$/, '');
@@ -76,78 +75,58 @@ Deno.serve(async (req) => {
     return json({ error: 'ยังไม่ได้ตั้งค่า RESEND_API_KEY ที่ Supabase — ตั้งก่อนจึงจะส่งเมลได้' }, 400);
   }
 
-  // ---- ผู้เรียกต้องเป็น HR หรือผู้ดูแลระบบ ----
-  const token = (req.headers.get('Authorization') || '').replace('Bearer ', '');
-  const { data: u } = await admin.auth.getUser(token);
-  if (!u?.user) return json({ error: 'token ไม่ถูกต้อง' }, 401);
+  const auth = req.headers.get('Authorization') || '';
+  if (!auth.startsWith('Bearer ')) return json({ error: 'ไม่ได้ล็อกอิน' }, 401);
 
-  const { data: caller } = await admin.schema('fee').from('staff')
-    .select('role, branch_codes').eq('id', u.user.id).maybeSingle();
-  if (!caller || !['hr', 'admin'].includes(caller.role)) {
-    return json({ error: 'เฉพาะฝ่าย HR หรือผู้ดูแลระบบเท่านั้นที่ส่งเมลได้' }, 403);
-  }
-  const { data: prof } = await admin.from('profiles')
-    .select('username').eq('id', u.user.id).maybeSingle();
-  const sentBy = prof?.username || u.user.id;
+  // client ที่ "เป็นตัวคนกด" — RPC จะเห็น auth.uid() ของคนนั้น แล้วตรวจสิทธิ์เอง
+  const asUser = createClient(
+    Deno.env.get('SUPABASE_URL')!,
+    Deno.env.get('SUPABASE_ANON_KEY')!,
+    { auth: { persistSession: false }, global: { headers: { Authorization: auth } } },
+  );
 
   const body = await req.json().catch(() => ({}));
   const action = String(body.action || '');
   const branch = String(body.branch || '');
   const ym = String(body.ym || '');
   const lics: string[] = Array.isArray(body.licNos) ? body.licNos.map(String) : [];
-  const pid = `${branch}-${ym.replace('-', '')}`;
+  // wht_cert: { [licNo]: { filename, content(base64) } } — แนบได้คนละ 1 ไฟล์
+  const files: Record<string, { filename: string; content: string }> =
+    body.attachments && typeof body.attachments === 'object' ? body.attachments : {};
+  const note = String(body.note || '').slice(0, 1000);
 
   if (!branch || !ym) return json({ error: 'ต้องระบุสาขาและเดือน' }, 400);
   if (!lics.length) return json({ error: 'ยังไม่ได้เลือกแพทย์' }, 400);
-  if (!['sign_invite', 'tax_detail'].includes(action)) {
-    return json({ error: `คำสั่งไม่รู้จัก: ${action}` }, 400);
-  }
-  // HR ที่ถูกจำกัดสาขา ส่งข้ามสาขาไม่ได้
-  const scope: string[] = caller.branch_codes || [];
-  if (!scope.includes('*') && !scope.includes(branch) && caller.role !== 'admin') {
-    return json({ error: `ไม่มีสิทธิ์สาขา ${branch}` }, 403);
-  }
 
-  // ---- รอบต้องอนุมัติแล้ว ----
-  const { data: period } = await admin.schema('fee').from('period')
-    .select('pid, status, snapshot, ym, branch').eq('pid', pid).maybeSingle();
-  if (!period) return json({ error: 'ยังไม่มีข้อมูลของรอบนี้' }, 400);
-  if (!['APPROVED', 'PAID'].includes(period.status)) {
-    return json({ error: `ส่งเมลได้เฉพาะรอบที่อนุมัติแล้ว (ตอนนี้ ${period.status})` }, 400);
-  }
+  const { data: ctx, error: pErr } = await asUser.rpc('fee_mail_prepare', {
+    p_action: action, p_branch: branch, p_ym: ym, p_lics: lics,
+  });
+  if (pErr) return json({ error: pErr.message }, 403);
 
-  const lines: Record<string, { gross: number; tax: number; net: number }> = {};
-  for (const l of (period.snapshot?.lines || [])) {
-    lines[String(l.licNo)] = { gross: +l.gross || 0, tax: +l.tax || 0, net: +l.net || 0 };
-  }
-
-  const { data: docs } = await admin.schema('fee').from('doctor')
-    .select('lic_no, full_name, nick_name, contact, email').in('lic_no', lics);
-
-  const { data: branchRow } = await admin.from('branches')
-    .select('name_th').eq('code', branch).maybeSingle();
-  const branchTh = branchRow?.name_th || branch;
+  const pid: string = ctx.pid;
+  const branchTh: string = ctx.branchTh;
   const monthTh = ymThai(ym);
-
   const results: { licNo: string; ok: boolean; error?: string }[] = [];
+  const log: Record<string, unknown>[] = [];
 
-  for (const d of (docs || [])) {
-    // ทะเบียนมีช่อง email แยกแล้ว แต่ข้อมูลเก่าบางแถวยังเก็บอีเมลไว้ในช่องติดต่อ
-    const email = String(d.email || d.contact || '').trim().toLowerCase();
-    const licNo = String(d.lic_no);
-    const amt = lines[licNo];
+  for (const d of (ctx.rows || []) as {
+    licNo: string; name: string; email: string; gross: number; tax: number; net: number; inRound: boolean;
+  }[]) {
+    const licNo = String(d.licNo);
+    const email = String(d.email || '');
 
     if (!/^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i.test(email)) {
       results.push({ licNo, ok: false, error: 'ไม่มีอีเมลในทะเบียน' });
       continue;
     }
-    if (!amt) {
+    if (!d.inRound) {
       results.push({ licNo, ok: false, error: 'ไม่พบยอดของแพทย์ในรอบที่อนุมัติ' });
       continue;
     }
 
     let subject: string;
     let html: string;
+    const attachments: { filename: string; content: string }[] = [];
 
     if (action === 'sign_invite') {
       // token สุ่ม 32 ไบต์ — เก็บเฉพาะ hash ลงฐานข้อมูล ตัวจริงอยู่ในอีเมลเท่านั้น
@@ -155,24 +134,23 @@ Deno.serve(async (req) => {
       const plain = Array.from(raw, (b) => b.toString(16).padStart(2, '0')).join('');
       const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(plain));
       const hash = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
-
       const expires = new Date(Date.now() + 14 * 24 * 3600 * 1000).toISOString();
-      const { error: tErr } = await admin.schema('fee').from('doctor_token').insert({
-        token_hash: hash, pid, lic_no: licNo, purpose: 'SIGN',
-        expires_at: expires, created_by: sentBy,
+
+      const { error: tErr } = await asUser.rpc('fee_mail_token', {
+        p_pid: pid, p_lic: licNo, p_hash: hash, p_expires: expires,
       });
       if (tErr) { results.push({ licNo, ok: false, error: `สร้างลิงก์ไม่สำเร็จ: ${tErr.message}` }); continue; }
 
       const link = `${appUrl}/sign/${plain}`;
       subject = `ขอความอนุเคราะห์เซ็นรับรองรายได้ ${monthTh} · ${branchTh}`;
       html = shell('เซ็นรับรองรายได้ประจำเดือน', `
-        <p style="margin:0 0 6px;">เรียน ${esc(d.full_name)}</p>
+        <p style="margin:0 0 6px;">เรียน ${esc(d.name)}</p>
         <p style="margin:0;color:#5B6154;line-height:1.7;">
           ยอดค่าตอบแทนประจำเดือน <b>${esc(monthTh)}</b> สาขา<b>${esc(branchTh)}</b>
           ได้รับการอนุมัติเรียบร้อยแล้ว ขอความอนุเคราะห์อาจารย์ตรวจสอบยอดด้านล่าง
           แล้วกดปุ่มเพื่อเซ็นรับรองครับ
         </p>
-        ${amountTable(amt.gross, amt.tax, amt.net)}
+        ${amountTable(d.gross, d.tax, d.net)}
         <div style="text-align:center;margin:22px 0 8px;">
           <a href="${esc(link)}" style="display:inline-block;background:${SAGE};color:#fff;
              text-decoration:none;padding:13px 30px;border-radius:9px;font-weight:600;">
@@ -182,18 +160,46 @@ Deno.serve(async (req) => {
         <p style="color:#8A8F80;font-size:.8rem;text-align:center;margin:0;">
           ลิงก์นี้ใช้ได้เฉพาะอาจารย์ท่านเดียว และมีอายุ 14 วัน · กรุณาอย่าส่งต่อให้ผู้อื่น
         </p>`);
+    } else if (action === 'wht_cert') {
+      const f = files[licNo];
+      if (!f || !f.content) {
+        results.push({ licNo, ok: false, error: 'ยังไม่ได้แนบไฟล์ 50 ทวิ ของแพทย์คนนี้' });
+        continue;
+      }
+      // Resend รับไฟล์แนบรวมไม่เกิน 40MB — จำกัดไว้ที่ 8MB ต่อไฟล์ก็เหลือเฟือสำหรับ PDF
+      if (f.content.length > 8 * 1024 * 1024 * 1.37) {
+        results.push({ licNo, ok: false, error: 'ไฟล์ใหญ่เกิน 8MB' });
+        continue;
+      }
+      const fname = String(f.filename || `50ทวิ_${licNo}_${ym}.pdf`).replace(/[\\/:*?"<>|]+/g, '_');
+      attachments.push({ filename: fname, content: f.content });
+      subject = `หนังสือรับรองการหักภาษี ณ ที่จ่าย (50 ทวิ) ${monthTh} · ${branchTh}`;
+      html = shell('หนังสือรับรองการหักภาษี ณ ที่จ่าย', `
+        <p style="margin:0 0 6px;">เรียน ${esc(d.name)}</p>
+        <p style="margin:0;color:#5B6154;line-height:1.7;">
+          ฝ่ายบัญชีขอส่ง <b>หนังสือรับรองการหักภาษี ณ ที่จ่าย (50 ทวิ)</b>
+          สำหรับค่าตอบแทนประจำเดือน <b>${esc(monthTh)}</b> สาขา<b>${esc(branchTh)}</b>
+          ตามไฟล์แนบครับ
+        </p>
+        ${amountTable(d.gross, d.tax, d.net)}
+        ${note ? `<p style="color:#5B6154;font-size:.9rem;line-height:1.7;margin:0 0 10px;">${esc(note)}</p>` : ''}
+        <p style="color:#8A8F80;font-size:.82rem;line-height:1.7;margin:0;">
+          ไฟล์แนบ: ${esc(fname)} · กรุณาเก็บไว้ใช้ยื่นแบบภาษีเงินได้บุคคลธรรมดาประจำปี
+          หากยอดไม่ตรงกับที่ได้รับ กรุณาติดต่อฝ่ายบัญชีครับ
+        </p>`);
     } else {
       subject = `รายละเอียดการหักภาษี ณ ที่จ่าย ${monthTh} · ${branchTh}`;
       html = shell('รายละเอียดการหักภาษี ณ ที่จ่าย', `
-        <p style="margin:0 0 6px;">เรียน ${esc(d.full_name)}</p>
+        <p style="margin:0 0 6px;">เรียน ${esc(d.name)}</p>
         <p style="margin:0;color:#5B6154;line-height:1.7;">
           สรุปการหักภาษี ณ ที่จ่ายสำหรับค่าตอบแทนประจำเดือน <b>${esc(monthTh)}</b>
           สาขา<b>${esc(branchTh)}</b> ดังนี้ครับ
         </p>
-        ${amountTable(amt.gross, amt.tax, amt.net)}
+        ${amountTable(d.gross, d.tax, d.net)}
+        ${note ? `<p style="color:#5B6154;font-size:.9rem;line-height:1.7;margin:0 0 10px;">${esc(note)}</p>` : ''}
         <p style="color:#5B6154;font-size:.9rem;line-height:1.7;margin:0;">
-          ภาษีหัก ณ ที่จ่ายคำนวณในอัตรา 3% ของเงินได้ · หนังสือรับรองการหักภาษี ณ ที่จ่าย (50 ทวิ)
-          ฝ่ายบัญชีจะจัดส่งให้ตามรอบ หากมีข้อสงสัยกรุณาติดต่อฝ่ายบุคคลได้เลยครับ
+          หนังสือรับรองการหักภาษี ณ ที่จ่าย (50 ทวิ) ฝ่ายบัญชีจะจัดส่งให้ตามรอบ
+          หากมีข้อสงสัยกรุณาติดต่อฝ่ายบัญชีได้เลยครับ
         </p>`);
     }
 
@@ -203,7 +209,10 @@ Deno.serve(async (req) => {
       const r = await fetch('https://api.resend.com/emails', {
         method: 'POST',
         headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ from, to: [email], subject, html }),
+        body: JSON.stringify({
+          from, to: [email], subject, html,
+          ...(attachments.length ? { attachments } : {}),
+        }),
       });
       const jr = await r.json().catch(() => ({}));
       ok = r.ok;
@@ -213,21 +222,19 @@ Deno.serve(async (req) => {
       errMsg = e instanceof Error ? e.message : String(e);
     }
 
-    await admin.schema('fee').from('email_log').insert({
-      pid, lic_no: licNo,
-      kind: action === 'sign_invite' ? 'SIGN_INVITE' : 'TAX_DETAIL',
-      to_email: email, subject, status: ok ? 'SENT' : 'FAILED',
-      provider_id: providerId, error: errMsg || null, sent_by: sentBy,
-    });
-
+    log.push({ licNo, toEmail: email, subject, ok, providerId, error: errMsg || '' });
     results.push({ licNo, ok, error: errMsg || undefined });
   }
 
-  const sent = results.filter((r) => r.ok).length;
-  await admin.schema('fee').from('audit').insert({
-    actor: sentBy, action: action === 'sign_invite' ? 'MAIL_SIGN_INVITE' : 'MAIL_TAX_DETAIL',
-    target: pid, detail: `ส่งสำเร็จ ${sent}/${results.length} ฉบับ`,
-  });
+  // บันทึกผลลงฐาน — ถ้าบันทึกไม่ได้ เมลก็ส่งไปแล้ว จึงไม่ตีกลับทั้งคำสั่ง แค่แจ้งเตือน
+  let logError: string | undefined;
+  if (log.length || results.length) {
+    const { error: lErr } = await asUser.rpc('fee_mail_record', {
+      p_pid: pid, p_action: action, p_rows: log,
+    });
+    if (lErr) logError = `ส่งเมลแล้ว แต่บันทึกประวัติไม่สำเร็จ: ${lErr.message}`;
+  }
 
-  return json({ ok: true, sent, total: results.length, results });
+  const sent = results.filter((r) => r.ok).length;
+  return json({ ok: true, sent, total: results.length, results, logError });
 });

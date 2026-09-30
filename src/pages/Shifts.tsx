@@ -7,6 +7,7 @@ import { toIsoDate, toThaiDate, cellStr } from '../lib/core';
 import {
   Alerts, BranchMonthPicker, Card, Note, Skeleton, StatusPill, useAsync,
 } from '../components/ui';
+import { docNick } from '../lib/names';
 
 const KINDS: { v: string; t: string }[] = [
   { v: 'SHIFT', t: 'เวรปกติ' },
@@ -129,7 +130,7 @@ export default function Shifts({ scope }: { scope: Scope }) {
                 <button key={s.licNo + s.date} className="sm"
                   onClick={() => addRow(s.licNo, s.date)}
                 >
-                  + {d?.nickName || s.licNo} · {toThaiDate(s.date)}
+                  + {docNick(d?.nickName) || s.licNo} · {toThaiDate(s.date)}
                 </button>
               );
             })}
@@ -177,7 +178,7 @@ export default function Shifts({ scope }: { scope: Scope }) {
                         <option value="">— เลือก —</option>
                         {docs.map((d) => (
                           <option key={d.licNo} value={d.licNo}>
-                            {d.licNo} · {d.nickName || d.fullName}
+                            {d.licNo} · {docNick(d.nickName) || d.fullName}
                           </option>
                         ))}
                       </select>
