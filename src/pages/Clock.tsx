@@ -19,6 +19,32 @@ function todayIso() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+/* ---------------------- ผู้ดูแลการลงเวลา ----------------------
+ * เก็บไว้ในหมายเหตุของใบเวร แบบอ่านออกทั้งคนและเครื่อง:
+ *   "เข้า 12:00 ดูแลโดย คุณเอ · ออก 20:05 ดูแลโดย คุณบี"
+ * ถ้าเวลาที่เลือกต่างจากเวลาที่กดจริงเกิน 5 นาที ต่อท้าย "(กด 12:34)" ไว้ตรวจย้อนได้
+ */
+const SUP_KEY = 'fee.supervisors';
+const loadSup = (): string[] => { try { return JSON.parse(localStorage.getItem(SUP_KEY) || '[]'); } catch { return []; } };
+const saveSup = (name: string) => {
+  try {
+    const list = [name, ...loadSup().filter((x) => x !== name)].slice(0, 20);
+    localStorage.setItem(SUP_KEY, JSON.stringify(list));
+  } catch { /* ไม่เป็นไร */ }
+};
+const toMin = (t: string) => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+export function supervisorsOf(note: string) {
+  const inM = note.match(/เข้า (\d{1,2}:\d{2}) ดูแลโดย ([^·(]+)/);
+  const outM = note.match(/ออก (\d{1,2}:\d{2}) ดูแลโดย ([^·(]+)/);
+  return { in: inM ? inM[2].trim() : '', out: outM ? outM[2].trim() : '' };
+}
+const KINDS = [
+  { v: 'SHIFT', t: 'เวรปกติ' }, { v: 'NIGHT', t: 'เวรข้ามคืน' },
+  { v: 'MEETING', t: 'ประชุมประจำเดือน' }, { v: 'KOL', t: 'ค่าตอบแทน KOL' },
+];
+interface Dlg { mode: 'in' | 'out'; licNo: string; name: string; time: string; by: string;
+  kind: string; brk: string; note: string; timeIn?: string }
+
 export default function Clock({ scope }: { scope: Scope }) {
   const { boot } = useAuth();
   const [ws, setWs] = useState<Workspace | null>(null);
@@ -131,22 +157,67 @@ export default function Clock({ scope }: { scope: Scope }) {
     });
   }
 
-  const clockIn = (licNo: string) => writeShifts(
-    (rows) => [...rows, {
-      id: '', licNo, workDate: today, timeIn: nowHHMM(), timeOut: '', breakMin: 0,
-      specialAmt: '', handOverride: '', deductOther: 0, kind: 'SHIFT', note: '', source: 'CLOCK',
-    }],
-    `บันทึกเข้าเวร ${nowHHMM()} น. แล้ว`,
-  );
+  /* ---------- กล่องลงเวลา: เลือกเวลา + ผู้ดูแล ---------- */
+  const [dlg, setDlg] = useState<Dlg | null>(null);
+  const [supList, setSupList] = useState<string[]>(loadSup);
+  const defaultBy = () => supList[0] || boot?.me.name || '';
 
-  const clockOut = (licNo: string) => writeShifts(
-    (rows) => rows.map((s) => (
-      cellStr(s.licNo) === licNo && toIsoDate(s.workDate) === today
-        && cellStr(s.timeIn) && !cellStr(s.timeOut)
-        ? { ...s, timeOut: nowHHMM() } : s
-    )),
-    `บันทึกออกเวร ${nowHHMM()} น. แล้ว`,
-  );
+  const openIn = (licNo: string, name: string) => setDlg({
+    mode: 'in', licNo, name, time: nowHHMM(), by: defaultBy(), kind: 'SHIFT', brk: '0', note: '',
+  });
+  const openOut = (licNo: string, name: string, open: ShiftRow) => setDlg({
+    mode: 'out', licNo, name, time: nowHHMM(), by: defaultBy(), kind: cellStr(open.kind) || 'SHIFT',
+    brk: String(Number(open.breakMin) || 0), note: '', timeIn: cellStr(open.timeIn),
+  });
+
+  /** ข้อความหมายเหตุที่บันทึกคู่กับเวลา */
+  const stamp = (mode: 'in' | 'out', time: string, by: string, extra: string) => {
+    const real = nowHHMM();
+    const off = Math.abs(toMin(real) - toMin(time)) > 5 ? ` (กด ${real})` : '';
+    return [`${mode === 'in' ? 'เข้า' : 'ออก'} ${time} ดูแลโดย ${by}${off}`, extra.trim()].filter(Boolean).join(' · ');
+  };
+
+  const dlgError = (d: Dlg): string => {
+    if (!/^\d{1,2}:\d{2}$/.test(d.time)) return 'เลือกเวลาให้ครบ';
+    if (!d.by.trim()) return 'กรอกชื่อผู้ดูแลการลงเวลา';
+    if (d.mode === 'out' && d.timeIn && d.kind !== 'NIGHT' && toMin(d.time) <= toMin(d.timeIn)) {
+      return `เวลาออกต้องหลังเวลาเข้า (${d.timeIn}) — ถ้าเป็นเวรข้ามคืน เลือกประเภท “เวรข้ามคืน”`;
+    }
+    if (Number(d.brk) < 0 || Number.isNaN(Number(d.brk))) return 'เวลาพักไม่ถูกต้อง';
+    return '';
+  };
+
+  const confirmDlg = () => {
+    if (!dlg) return;
+    const e = dlgError(dlg);
+    if (e) { setErr(e); return; }
+    const by = dlg.by.trim();
+    saveSup(by); setSupList(loadSup());
+    const d = dlg;
+    setDlg(null);
+    if (d.mode === 'in') {
+      writeShifts(
+        (rows) => [...rows, {
+          id: '', licNo: d.licNo, workDate: today, timeIn: d.time, timeOut: '', breakMin: 0,
+          specialAmt: '', handOverride: '', deductOther: 0, kind: d.kind, source: 'CLOCK',
+          note: stamp('in', d.time, by, d.note),
+        }],
+        `บันทึกเข้าเวร ${d.name} ${d.time} น. · ดูแลโดย ${by}`,
+      );
+    } else {
+      writeShifts(
+        (rows) => rows.map((s) => (
+          cellStr(s.licNo) === d.licNo && toIsoDate(s.workDate) === today
+            && cellStr(s.timeIn) && !cellStr(s.timeOut)
+            ? {
+              ...s, timeOut: d.time, breakMin: Number(d.brk) || 0, kind: d.kind,
+              note: [cellStr(s.note), stamp('out', d.time, by, d.note)].filter(Boolean).join(' · '),
+            } : s
+        )),
+        `บันทึกออกเวร ${d.name} ${d.time} น. · ดูแลโดย ${by}`,
+      );
+    }
+  };
 
   /** เซ็นรับรองใบเวลาทั้งเดือน — ลายเซ็นผูกกับลายนิ้วมือของใบเวรทั้งเดือน
    *  ถ้าใครแก้เวลาหลังเซ็น สถานะจะกลายเป็น “ต้องเซ็นใหม่” ทันที */
@@ -210,8 +281,8 @@ export default function Clock({ scope }: { scope: Scope }) {
                 <span className="pill rev">มีคนลงเวลานอกตาราง {onDuty.size - planLics.size} คน</span>
               )}
               {!viewingToday && (
-                <span className="pill none">
-                  กระดานนี้เป็นของวันนี้เสมอ (เดือนที่เลือกดูมีผลกับตารางด้านล่าง)
+                <span className="pill warn">
+                  กำลังดูเดือนอื่น — เปลี่ยนเดือนเป็นเดือนปัจจุบันก่อนจึงจะกดลงเวลาได้
                 </span>
               )}
               <div className="spacer" />
@@ -265,17 +336,25 @@ export default function Clock({ scope }: { scope: Scope }) {
                   ) : (
                     <span className="pill none">ยังไม่ลงเวลา</span>
                   )}
+                  {[...(open ? [open] : []), ...done].map((sh, i) => {
+                    const sp = supervisorsOf(cellStr(sh.note));
+                    return (sp.in || sp.out) ? (
+                      <div key={i} className="muted" style={{ fontSize: '.78rem', marginTop: 4 }}>
+                        👤 ผู้ดูแล{sp.in && <> · เข้า: <b>{sp.in}</b></>}{sp.out && <> · ออก: <b>{sp.out}</b></>}
+                      </div>
+                    ) : null;
+                  })}
                 </div>
                 <div className="row">
                   {!open ? (
-                    <button className="primary sm" disabled={busy || locked}
-                      onClick={() => clockIn(doc.licNo!)}
+                    <button className="primary sm" disabled={busy || locked || !viewingToday}
+                      onClick={() => openIn(doc.licNo!, docNick(doc.nickName) || doc.fullName || doc.licNo!)}
                     >
                       เข้าเวร
                     </button>
                   ) : (
-                    <button className="sm" disabled={busy || locked}
-                      onClick={() => clockOut(doc.licNo!)}
+                    <button className="sm" disabled={busy || locked || !viewingToday}
+                      onClick={() => openOut(doc.licNo!, docNick(doc.nickName) || doc.fullName || doc.licNo!, open)}
                     >
                       ออกเวร
                     </button>
@@ -398,6 +477,76 @@ export default function Clock({ scope }: { scope: Scope }) {
           </div>
         )}
       </Card>
+    
+      {/* ---------- กล่องลงเวลา ---------- */}
+      {dlg && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(35,38,31,.45)', zIndex: 60,
+          display: 'grid', placeItems: 'center', padding: 16 }}
+          onClick={(e) => { if (e.target === e.currentTarget) setDlg(null); }}
+        >
+          <div className="card" style={{ maxWidth: 420, width: '100%', margin: 0 }}>
+            <h3 style={{ marginTop: 0 }}>
+              {dlg.mode === 'in' ? '🟢 เข้าเวร' : '🔴 ออกเวร'} · {dlg.name}
+            </h3>
+            <p className="muted" style={{ marginTop: -6 }}>
+              {toThaiDate(today)} · สาขา {scope.branch}
+              {dlg.mode === 'out' && dlg.timeIn && <> · เข้าเวร {dlg.timeIn} น.</>}
+            </p>
+
+            <div className="field">
+              <label>{dlg.mode === 'in' ? 'เวลาเข้าเวร' : 'เวลาออกเวร'}</label>
+              <div className="row" style={{ gap: 6 }}>
+                <input type="time" value={dlg.time} step={60} style={{ fontSize: '1.3rem', flex: 1 }}
+                  onChange={(e) => setDlg({ ...dlg, time: e.target.value })} />
+                <button className="sm" onClick={() => setDlg({ ...dlg, time: nowHHMM() })}>ตอนนี้</button>
+              </div>
+            </div>
+
+            <div className="field">
+              <label>ผู้ดูแลการลงเวลา (ผู้ที่อยู่ด้วยตอนหมอลงเวลา)</label>
+              <input list="fee-sup" value={dlg.by} placeholder="ชื่อพนักงานเคาน์เตอร์ / ผู้จัดการสาขา"
+                onChange={(e) => setDlg({ ...dlg, by: e.target.value })} />
+              <datalist id="fee-sup">{supList.map((x) => <option key={x} value={x} />)}</datalist>
+            </div>
+
+            <div className="row" style={{ gap: 8 }}>
+              <div className="field" style={{ flex: 1 }}>
+                <label>ประเภทเวร</label>
+                <select value={dlg.kind} onChange={(e) => setDlg({ ...dlg, kind: e.target.value })}>
+                  {KINDS.map((k) => <option key={k.v} value={k.v}>{k.t}</option>)}
+                </select>
+              </div>
+              {dlg.mode === 'out' && (
+                <div className="field" style={{ width: 120 }}>
+                  <label>พัก (นาที)</label>
+                  <input type="number" min={0} step={5} value={dlg.brk}
+                    onChange={(e) => setDlg({ ...dlg, brk: e.target.value })} />
+                </div>
+              )}
+            </div>
+
+            <div className="field">
+              <label>หมายเหตุ (ไม่บังคับ)</label>
+              <input value={dlg.note} placeholder="เช่น มาแทนหมอ… / รถติด / ออกก่อนเวลาแจ้งล่วงหน้า"
+                onChange={(e) => setDlg({ ...dlg, note: e.target.value })} />
+            </div>
+
+            {dlgError(dlg) && <Note tone="warn">{dlgError(dlg)}</Note>}
+            {Math.abs(toMin(nowHHMM()) - toMin(dlg.time || '0:0')) > 5 && !dlgError(dlg) && (
+              <Note tone="info">
+                เวลาที่เลือกต่างจากเวลาตอนนี้ ({nowHHMM()} น.) — ระบบจะบันทึกเวลาที่กดจริงคู่ไว้ให้ตรวจย้อนได้
+              </Note>
+            )}
+
+            <div className="row" style={{ justifyContent: 'flex-end', marginTop: 10 }}>
+              <button onClick={() => setDlg(null)}>ยกเลิก</button>
+              <button className="primary" disabled={busy || !!dlgError(dlg)} onClick={confirmDlg}>
+                ยืนยัน{dlg.mode === 'in' ? 'เข้าเวร' : 'ออกเวร'} {dlg.time} น.
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
