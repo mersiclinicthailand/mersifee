@@ -181,6 +181,19 @@ export default function Roster({ scope }: { scope: Scope }) {
           onBranch={scope.setBranch} onYm={scope.setYm} hideBranch={view === 'grid'}
         />
         <div className="spacer" />
+        {mayEdit && (data?.rows || []).some((r) => !r.licNo) && (
+          <button className="sm" disabled={busy}
+            title="จับคู่ชื่อที่ยังไม่มีเลข ว. ใหม่ด้วยกติกาล่าสุด และลบช่อง OFF ที่หลุดเข้ามา"
+            onClick={() => run(async () => {
+              const r = await api.rosterRematch(scope.ym);
+              load();
+              setMsg(`จับคู่ใหม่แล้ว ${r.matched} เวร · ลบช่อง OFF ${r.removedOff} ช่อง · `
+                + `ยังไม่มีเลข ว. ${r.stillUnknown} เวร${r.stillUnknown ? ' (คลิกที่ช่องนั้นเพื่อเลือกแพทย์เอง)' : ''}`);
+            })}
+          >
+            🔄 จับคู่ชื่อใหม่ ({(data?.rows || []).filter((r) => !r.licNo).length})
+          </button>
+        )}
         {mayEdit && (
           <button className="sm" onClick={() => setShowImport((v) => !v)}>
             {showImport ? 'ปิดการนำเข้า' : '↑ นำเข้าไฟล์ตารางเวร'}

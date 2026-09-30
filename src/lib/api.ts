@@ -253,6 +253,14 @@ export const api = {
     return r;
   },
 
+  /** จับคู่ชื่อในตารางแพทย์ใหม่ทั้งเดือน + ลบช่อง OFF ที่หลุดเข้ามา (ไม่ต้องนำเข้าไฟล์ซ้ำ) */
+  async rosterRematch(ym: string) {
+    const r = await rpc<{ removedOff: number; matched: number; stillUnknown: number }>(
+      'fee_roster_rematch', { p_ym: ym });
+    dropCache('roster:');
+    return r;
+  },
+
   async rosterImport(ym: string, rows: unknown[]) {
     const r = await rpc<RosterImportResult>('fee_roster_import', { p_ym: ym, p_rows: rows });
     dropCache('roster:');

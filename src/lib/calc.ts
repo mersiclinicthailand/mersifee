@@ -404,6 +404,8 @@ export function calcCore(ctx: CalcCtx): CalcResult {
       if (!pick) {
         issue('NO_RATE', lic, toThaiDate(date), date);
         rows.push({ date, error: 'ไม่มีอัตรา' });
+        // วันนี้มีใบเวรแล้ว ติดแค่เรื่องอัตรา — ไม่ต้องแจ้ง PROC_NO_SHIFT ซ้ำให้งง
+        usedKeys[lic + '|' + date] = true;
         return;
       }
       if (pick.ambiguous) issue('RATE_OVERLAP', lic, toThaiDate(date), date);

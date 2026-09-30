@@ -278,6 +278,10 @@ const licDigits = (v: unknown): string => {
   return m ? m[1] : '';
 };
 
+/** ช่องที่ไม่ใช่ชื่อหมอ — "OFF", "หยุด", "ไม่มีแพทย์", "-" ฯลฯ ไม่ต้องเก็บเป็นเวร */
+export const isOffCell = (v: string) =>
+  /^(|off\.?|day ?off|-|–|หยุด|ปิด|ปิดสาขา|ไม่มีแพทย์|ไม่มีหมอ|ว่าง)$/i.test((v || '').replace(/\s+/g, ' ').trim());
+
 /** ชื่อในไฟล์เขียนเป็นชื่อเล่นล้วน ("ออย") — เก็บให้อยู่ในรูปเดียวกับไฟล์กริด ("หมอออย") */
 const docLabelOf = (nick: string): string => {
   const t = nick.trim();
@@ -351,7 +355,7 @@ export async function parseRosterFile(file: File): Promise<RosterParsed> {
       const iso = toIsoDate(a[iDate]);
       const code0 = cellText(a[iCode]).trim().toUpperCase();
       const nick = cellText(a[iNick]).trim();
-      if (!iso || !code0 || !nick) continue;
+      if (!iso || !code0 || !nick || isOffCell(nick)) continue;
       const branch = ROSTER_BRANCH_FIX[code0] || code0;
       const key = iso.substring(0, 7);
       ymCount.set(key, (ymCount.get(key) || 0) + 1);
@@ -395,14 +399,17 @@ export async function parseRosterFile(file: File): Promise<RosterParsed> {
       days.add(iso);
       cols.forEach((col) => {
         const v = cellText(a[col.c]);
-        if (!v || v === 'ไม่มีแพทย์' || v === '-') return;
-        // ไฟล์รุ่นใหม่เขียนเลข ว. ไว้บรรทัดที่สองของช่อง
+        if (isOffCell(v)) return;
+        // ไฟล์รุ่นใหม่เขียนเลข ว. ไว้บรรทัดที่สองของช่อง · บางไฟล์เขียนเวลาเข้างาน เช่น "14.00-20.00"
         const parts = v.split(/[\n\r]+/).map((t) => t.trim()).filter(Boolean);
         const label = parts[0] || v;
-        const lic = parts.slice(1).map(licDigits).find(Boolean) || '';
+        if (isOffCell(label)) return;
+        const rest = parts.slice(1);
+        const lic = rest.map((t) => (/^ว\.?\s*\d/.test(t) || /^\d{4,6}$/.test(t) ? licDigits(t) : '')).find(Boolean) || '';
+        const extra = rest.filter((t) => !(/^ว\.?\s*\d/.test(t) || /^\d{4,6}$/.test(t))).join(' ');
         rows.push({
           workDate: iso, branch: col.code, docLabel: label,
-          licNo: lic, amGroup: col.am, status: 'ยืนยัน', note: '',
+          licNo: lic, amGroup: col.am, status: 'ยืนยัน', note: extra,
         });
       });
     }
