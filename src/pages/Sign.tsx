@@ -17,14 +17,26 @@ export default function Sign() {
   const [done, setDone] = useState<string | null>(null);
   const { busy, err, setErr, run } = useAsync();
 
+  /* โหมดสาธิต — ลิงก์จากเมลทดสอบ (/sign/demo) แสดงข้อมูลตัวอย่าง เซ็นได้แต่ไม่บันทึก */
+  const demo = token === 'demo';
+
   useEffect(() => {
+    if (demo) {
+      setView({
+        licNo: '00000', name: 'นพ.ตัวอย่าง ทดสอบระบบ', branch: 'BN', branchTh: 'บางนา', ym: '2026-08',
+        gross: 99300, tax: 1044, net: 98256, payeeType: 'PERSON', payeeName: '',
+        bank: 'SCB', bankAcc: '000-000000-0', signedAt: null,
+      });
+      return;
+    }
     api.signOpen(token)
       .then((v) => { setView(v); setDone(v.signedAt); })
       .catch((e) => setErr(e.message));
-  }, [token, setErr]);
+  }, [token, setErr, demo]);
 
   const submit = () => run(async () => {
     if (!png) { setErr('กรุณาเซ็นในกรอบก่อนครับ'); return; }
+    if (demo) { setDone(new Date(Date.now() + 7 * 3600 * 1000).toISOString()); return; }
     const r = await api.signSubmit(token, png);
     setDone(r.signedAt);
   });
@@ -40,6 +52,10 @@ export default function Sign() {
           </p>
 
           <Alerts err={err} msg={null} />
+
+          {demo && (
+            <Note tone="warn">🧪 หน้าสาธิตจากเมลทดสอบ — ข้อมูลเป็นตัวอย่าง ลองเซ็นได้ แต่ระบบไม่บันทึก</Note>
+          )}
 
           {!view && !err && <Skeleton rows={5} />}
 

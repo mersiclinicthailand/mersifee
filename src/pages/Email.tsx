@@ -6,6 +6,7 @@ import {
   Alerts, BranchMonthPicker, Card, Money, Note, Skeleton, StatusPill, useAsync, YmLabel,
 } from '../components/ui';
 import { docNick } from '../lib/names';
+import MailTest from '../components/MailTest';
 
 const thTime = (s: string | null) =>
   (s ? s.replace('T', ' ').substring(0, 16) : '—');
@@ -55,6 +56,8 @@ export default function EmailPage({ scope }: { scope: Scope }) {
       </div>
 
       <Alerts err={err} msg={msg} />
+
+      <MailTest branch={scope.branch} ym={scope.ym} kinds={['sign_invite']} defaultKind="sign_invite" />
 
       {!data ? <div className="card"><Skeleton rows={5} /></div> : (
         <>

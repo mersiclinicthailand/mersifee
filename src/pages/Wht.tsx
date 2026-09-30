@@ -14,6 +14,7 @@ import type { Scope } from '../App';
 import { api, type MailRow, type MailTargets } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { docNick, splitName } from '../lib/names';
+import MailTest from '../components/MailTest';
 import {
   Alerts, BranchMonthPicker, Card, Money, Note, Skeleton, StatusPill, useAsync, YmLabel,
 } from '../components/ui';
@@ -167,6 +168,8 @@ export default function Wht({ scope }: { scope: Scope }) {
       </div>
 
       <Alerts err={err} msg={msg} />
+
+      <MailTest branch={scope.branch} ym={scope.ym} kinds={['wht_cert', 'tax_detail']} defaultKind="wht_cert" />
 
       {!data ? <div className="card"><Skeleton rows={5} /></div> : (
         <>

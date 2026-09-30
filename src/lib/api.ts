@@ -348,6 +348,24 @@ export const api = {
     };
   },
 
+  /** ส่งเมลตัวอย่าง (ข้อมูลสมมติ) ถึงอีเมลที่กรอก — ไว้ดูหน้าตาเมลจริงและทดสอบว่าส่งได้ */
+  async sendTest(
+    kind: 'sign_invite' | 'tax_detail' | 'wht_cert', testTo: string, branch: string, ym: string,
+    testFile?: { filename: string; content: string },
+  ) {
+    const { data, error } = await supabase.functions.invoke('fee-send-email', {
+      body: { action: 'test', kind, testTo, branch, ym, ...(testFile ? { testFile } : {}) },
+    });
+    if (error) {
+      let detail = '';
+      const ctx = (error as { context?: { json?: () => Promise<{ error?: string }> } }).context;
+      try { detail = (await ctx?.json?.())?.error || ''; } catch { /* ไม่มีตัวข้อความ */ }
+      throw new Error(detail || error.message);
+    }
+    if (data?.error) throw new Error(data.error);
+    return data as { ok: true; to: string };
+  },
+
   /* ------------- หน้าเซ็นของแพทย์ (เรียกได้โดยไม่ต้องล็อกอิน) ------------- */
   signOpen: (token: string) => rpc<SignView>('fee_sign_open', { p_token: token }),
   signSubmit: (token: string, png: string) =>
