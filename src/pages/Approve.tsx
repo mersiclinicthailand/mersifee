@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { Scope } from '../App';
+import { buildSnapshot } from '../lib/snapshot';
 import { api, type Workspace } from '../lib/api';
 import { useAuth, can } from '../lib/auth';
 import { calcCore, type CalcResult } from '../lib/calc';
@@ -75,9 +76,12 @@ export default function Approve({ scope }: { scope: Scope }) {
   async function doAction(a: Action, note: string) {
     setAsk(null);
     await run(async () => {
-      const snapshot = a === 'APPROVE' && res
-        ? { totals: res.totals, lines: res.lines.map((L) => ({ licNo: L.licNo, net: L.net, gross: L.gross, tax: L.taxAmt })) }
-        : null;
+      // ล็อกยอดละเอียดทั้งหมด (ใบเวรรายวัน + รายการค่ามือทุกแถว) ให้แพทย์ตรวจย้อนได้จากอีเมล
+      let snapshot: unknown = null;
+      if (a === 'APPROVE' && res && ws) {
+        const procs = (await api.listProc(ws.pid)) as Record<string, unknown>[];
+        snapshot = buildSnapshot(res, procs || []);
+      }
       const r = await api.workflow(scope.branch, scope.ym, a, note, snapshot);
       load();
       setMsg(`${LABEL[a]}เรียบร้อย — สถานะเป็น “${STATUS_TH[r.status] || r.status}”`);

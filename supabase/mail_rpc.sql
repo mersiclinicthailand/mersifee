@@ -91,7 +91,9 @@ begin
            'gross', coalesce((l.v->>'gross')::numeric, 0),
            'tax',   coalesce((l.v->>'tax')::numeric, 0),
            'net',   coalesce((l.v->>'net')::numeric, 0),
-           'inRound', l.v is not null)
+           'inRound', l.v is not null,
+           -- รายละเอียดทั้งหมดที่ล็อกไว้ตอนอนุมัติ (ใบเวรรายวัน + รายการค่ามือ) — รอบที่อนุมัติก่อนอัปเดตจะไม่มี
+           'detail', case when (l.v ? 'days') then l.v else null end)
          order by d.lic_no), '[]'::jsonb)
     into v_rows
   from fee.doctor d
@@ -186,3 +188,40 @@ revoke all on function public.fee_mail_record(text, text, jsonb)              fr
 grant execute on function public.fee_mail_prepare(text, text, text, text[])    to authenticated;
 grant execute on function public.fee_mail_token(text, text, text, timestamptz) to authenticated;
 grant execute on function public.fee_mail_record(text, text, jsonb)            to authenticated;
+
+/* ------------------------- 4) รายละเอียดสำหรับหน้าเซ็นของแพทย์ -------------------------
+ * เปิดจากลิงก์ในอีเมล (ไม่ต้องล็อกอิน) — ตรวจ token แบบเดียวกับ fee_sign_open
+ * คืนเฉพาะบรรทัดของแพทย์เจ้าของลิงก์ จาก snapshot ที่ล็อกไว้ตอนอนุมัติ
+ * ------------------------------------------------------------------------------------ */
+create or replace function public.fee_sign_detail(p_token text)
+returns jsonb
+language plpgsql stable security definer
+set search_path to ''
+as $fn$
+declare
+  v_hash text := encode(sha256(convert_to(coalesce(p_token, ''), 'UTF8')), 'hex');
+  v_pid  text; v_lic text; v_line jsonb;
+begin
+  select t.pid, t.lic_no into v_pid, v_lic
+  from fee.doctor_token t
+  where t.token_hash = v_hash and t.expires_at > now()
+  order by t.expires_at desc limit 1;
+  if v_pid is null then
+    raise exception 'ลิงก์ไม่ถูกต้องหรือหมดอายุแล้ว';
+  end if;
+
+  select x into v_line
+  from fee.period p, jsonb_array_elements(coalesce(p.snapshot->'lines', '[]'::jsonb)) x
+  where p.pid = v_pid and x->>'licNo' = v_lic
+  limit 1;
+
+  if v_line is null or not (v_line ? 'days') then
+    return null;                                   -- รอบที่อนุมัติก่อนมีรายละเอียด
+  end if;
+  return v_line - 'bankAcc' || jsonb_build_object(
+    'bankAcc', regexp_replace(coalesce(v_line->>'bankAcc', ''), '.(?=.{4})', 'x', 'g'));
+end
+$fn$;
+
+revoke all on function public.fee_sign_detail(text) from public;
+grant execute on function public.fee_sign_detail(text) to anon, authenticated;

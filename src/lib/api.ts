@@ -376,6 +376,9 @@ export const api = {
 
   /* ------------- หน้าเซ็นของแพทย์ (เรียกได้โดยไม่ต้องล็อกอิน) ------------- */
   signOpen: (token: string) => rpc<SignView>('fee_sign_open', { p_token: token }),
+  /** รายละเอียดทั้งหมดที่ล็อกไว้ตอนอนุมัติ (ใบเวรรายวัน + ค่ามือทุกแถว) — null ถ้าเป็นรอบที่อนุมัติก่อนมีระบบนี้ */
+  signDetail: (token: string) =>
+    rpc<import('./mailtpl').Detail | null>('fee_sign_detail', { p_token: token }).catch(() => null),
   signSubmit: (token: string, png: string) =>
     rpc<{ ok: true; signedAt: string }>('fee_sign_submit', {
       p_token: token, p_png: png, p_device: navigator.userAgent.slice(0, 120),

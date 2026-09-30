@@ -7,6 +7,8 @@
 import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { api, type SignView } from '../lib/api';
+import { sampleDetail, type Detail } from '../lib/mailtpl';
+import IncomeDetail from '../components/IncomeDetail';
 import { toThaiDate, ymThai } from '../lib/core';
 import { Alerts, Money, Note, SignaturePad, Skeleton, useAsync } from '../components/ui';
 
@@ -15,6 +17,7 @@ export default function Sign() {
   const [view, setView] = useState<SignView | null>(null);
   const [png, setPng] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
+  const [detail, setDetail] = useState<Detail | null>(null);
   const { busy, err, setErr, run } = useAsync();
 
   /* โหมดสาธิต — ลิงก์จากเมลทดสอบ (/sign/demo) แสดงข้อมูลตัวอย่าง เซ็นได้แต่ไม่บันทึก */
@@ -27,8 +30,12 @@ export default function Sign() {
         gross: 99300, tax: 1044, net: 98256, payeeType: 'PERSON', payeeName: '',
         bank: 'SCB', bankAcc: '000-000000-0', signedAt: null,
       });
+      const smp = sampleDetail('2026-08');
+      setDetail(smp);
+      setView((v) => v && { ...v, gross: smp.gross, tax: smp.tax, net: smp.net });
       return;
     }
+    api.signDetail(token).then(setDetail);
     api.signOpen(token)
       .then((v) => { setView(v); setDone(v.signedAt); })
       .catch((e) => setErr(e.message));
@@ -43,7 +50,7 @@ export default function Sign() {
 
   return (
     <div className="login-wrap">
-      <div className="login" style={{ maxWidth: 460 }}>
+      <div className="login" style={{ maxWidth: detail ? 640 : 460 }}>
         <div className="card">
           <img className="mark-lg" src="/logo.png" alt="Mersi Clinic" />
           <h1 style={{ textAlign: 'center', marginBottom: 2 }}>Mersi Clinic</h1>
@@ -89,6 +96,15 @@ export default function Sign() {
                   )}
                 </tbody>
               </table>
+
+              {detail && (
+                <>
+                  <p className="muted" style={{ margin: '0 0 6px', fontSize: '.85rem' }}>
+                    ตรวจรายละเอียดได้ทุกบรรทัดก่อนเซ็น · กดที่วันเพื่อดูค่ามือของวันนั้น
+                  </p>
+                  <IncomeDetail d={detail} meta={{ name: view.name, licNo: view.licNo, branchTh: view.branchTh, ym: view.ym }} />
+                </>
+              )}
 
               {done ? (
                 <Note tone="ok">

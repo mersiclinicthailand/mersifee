@@ -67,6 +67,22 @@ export interface MailData {
   fileName?: string;       // wht_cert
   note?: string;           // ข้อความเพิ่มเติมจากผู้ส่ง
   test?: boolean;          // เมลทดสอบ — มีแถบบอกชัด ๆ
+  detail?: Detail | null;  // รายละเอียดที่ล็อกไว้ตอนอนุมัติ (ใบเวรรายวัน + ค่ามือทุกแถว)
+}
+
+/* รายละเอียดจาก snapshot ตอนอนุมัติ (ตรงกับ src/lib/snapshot.ts) */
+export interface Detail {
+  rate: number; taxBase: string; taxRate: number; taxBaseAmt: number;
+  sumHrs: number; sumMins: number;
+  shiftTotal: number; coverShift: number; handTotal: number;
+  adjAdd: number; adjDeduct: number; adjList: { kind: string; amount: number; reason: string }[];
+  gross: number; tax: number; deduct: number; net: number;
+  payeeType?: string; payeeName?: string; bank?: string; bankAcc?: string;
+  procCount: number;
+  days: { d: string; in: string; out: string; brk: number; hrs: number; mins: number; rate: number;
+          shift: number; hand: number; handRows: number; deduct: number; special: number | null;
+          kind: string; note: string; grace: string }[];
+  procs: { d: string; doc: string; c: string; q: number; f: number }[];
 }
 
 /* ---------------------------------- ชิ้นส่วน ---------------------------------- */
@@ -144,6 +160,160 @@ const noteBox = (note?: string) => (note ? `
     <tr><td style="border-left:3px solid ${B.champagne};background:#FBFAF6;padding:12px 16px;
       font-family:${FONT};font-size:14px;line-height:1.7;color:${B.ink2};">${esc(note)}</td></tr>
   </table>` : '');
+
+/* ------------------------------- รายละเอียดรายได้ ------------------------------- */
+
+const TH_DOW = ['อา', 'จ', 'อ', 'พ', 'พฤ', 'ศ', 'ส'];
+const dThai = (iso: string) => {
+  const [y, m, d] = iso.split('-').map(Number);
+  const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+  return `${TH_DOW[dow]} ${d} ${TH_MONTH[m - 1]}`;
+};
+const hm = (h: number, m: number) => `${h} ชม.${m ? ` ${m} น.` : ''}`;
+const KIND_TH: Record<string, string> = {
+  SHIFT: 'เวรปกติ', NIGHT: 'เวรดึก', MEETING: 'ประชุม', KOL: 'KOL', TRAIN: 'อบรม', COVER: 'เวรแทน',
+};
+const TAX_BASE_TH: Record<string, string> = { TOTAL: 'รวมเงินได้ทั้งหมด', SHIFT: 'เฉพาะค่าเวร', NONE: 'ไม่หักภาษี' };
+export const maskAcc = (a?: string) => (a ? a.replace(/.(?=.{4})/g, (c) => (/\d/.test(c) ? 'x' : c)) : '');
+
+const secTitle = (t: string, sub = '') => `
+  <div style="font-family:${FONT};font-size:15px;font-weight:700;color:${B.ink};margin:26px 0 4px;">${t}</div>
+  ${sub ? `<div style="font-family:${FONT};font-size:12.5px;color:${B.ink3};margin:0 0 10px;">${sub}</div>` : ''}`;
+
+const kv = (k: string, v: string, strong = false, color = B.ink) => `
+  <tr>
+    <td style="font-family:${FONT};font-size:13.5px;color:${B.ink2};padding:6px 0;border-bottom:1px solid ${B.line};">${k}</td>
+    <td align="right" style="font-family:${FONT};font-size:13.5px;color:${color};padding:6px 0;border-bottom:1px solid ${B.line};
+      ${strong ? 'font-weight:700;' : ''}white-space:nowrap;">${v}</td>
+  </tr>`;
+
+/** ที่มาของยอด — คำนวณให้เห็นทุกขั้น ตั้งแต่ชั่วโมงจนถึงยอดโอน */
+function breakdown(d: Detail) {
+  const rows = [
+    kv(`ค่าเวร · ${hm(d.sumHrs, d.sumMins)} × ${money(d.rate)} บาท/ชม.`, `${money(d.coverShift)} ฿`),
+    ...(Math.abs(d.coverShift - d.shiftTotal) > 0.004
+      ? [kv('<span style="font-size:12px;">(ยอดตามใบเวร ก่อนปรับตามเงื่อนไขสัญญา)</span>', `${money(d.shiftTotal)} ฿`, false, B.ink3)] : []),
+    kv(`ค่ามือ · ${d.procCount.toLocaleString('th-TH')} รายการ`, `${money(d.handTotal)} ฿`),
+    ...d.adjList.map((a) => kv(`${a.amount >= 0 ? 'ปรับเพิ่ม' : 'ปรับลด'} · ${esc(a.reason || a.kind)}`,
+      `${a.amount >= 0 ? '' : '−'}${money(Math.abs(a.amount))} ฿`, false, a.amount >= 0 ? B.ink : '#A04A3C')),
+    kv('<b>รวมเงินได้</b>', `${money(d.gross)} ฿`, true),
+    kv(`ฐานคิดภาษี · ${TAX_BASE_TH[d.taxBase] || d.taxBase}`, `${money(d.taxBaseAmt)} ฿`),
+    kv(`หักภาษี ณ ที่จ่าย ${d.taxRate}%`, `−${money(d.tax)} ฿`, false, '#A04A3C'),
+    ...(d.deduct ? [kv('หักอื่น ๆ (ดูหมายเหตุรายวัน)', `−${money(d.deduct)} ฿`, false, '#A04A3C')] : []),
+    kv('<b>จ่ายสุทธิ</b>', `${money(d.net)} ฿`, true, B.sageDk),
+  ];
+  const bank = d.bankAcc
+    ? `<div style="font-family:${FONT};font-size:12.5px;color:${B.ink3};margin-top:8px;">
+         โอนเข้า ${esc(d.bank || '')} ${esc(maskAcc(d.bankAcc))}
+         ${d.payeeType === 'COMPANY' && d.payeeName ? ` · ในนาม ${esc(d.payeeName)}` : ''}</div>` : '';
+  return `${secTitle('① ที่มาของยอด', 'คำนวณจากใบเวรและรายงานค่าหัตถการที่อนุมัติแล้ว')}
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">${rows.join('')}</table>${bank}`;
+}
+
+/** ใบเวรรายวัน — วันละบรรทัด */
+function dayTable(d: Detail) {
+  const th = (t: string, al = 'left') =>
+    `<th align="${al}" style="font-family:${FONT};font-size:11.5px;font-weight:600;color:${B.ink3};padding:7px 6px;
+      border-bottom:1px solid ${B.line};background:${B.cream};white-space:nowrap;">${t}</th>`;
+  const td = (t: string, al = 'left', extra = '') =>
+    `<td align="${al}" style="font-family:${FONT};font-size:12.5px;color:${B.ink};padding:7px 6px;border-bottom:1px solid ${B.line};${extra}">${t}</td>`;
+  const body = d.days.map((r) => {
+    const notes = [
+      r.kind && r.kind !== 'SHIFT' ? KIND_TH[r.kind] || r.kind : '',
+      r.grace, r.special !== null && r.special !== undefined ? `ยอดพิเศษ ${money(r.special)}` : '',
+      r.deduct ? `หัก ${money(r.deduct)}` : '', r.note,
+    ].filter(Boolean).map((x) => esc(x)).join(' · ');
+    return `<tr>
+      ${td(`<b>${dThai(r.d)}</b>`, 'left', 'white-space:nowrap;')}
+      ${td(r.in && r.out ? `${r.in}–${r.out}${r.brk ? `<br><span style="color:${B.ink3};font-size:11px;">พัก ${r.brk} น.</span>` : ''}` : '—', 'left', 'white-space:nowrap;')}
+      ${td(hm(r.hrs, r.mins), 'right', 'white-space:nowrap;')}
+      ${td(money(r.shift), 'right')}
+      ${td(`${money(r.hand)}${r.handRows ? `<br><span style="color:${B.ink3};font-size:11px;">${r.handRows} รายการ</span>` : ''}`, 'right')}
+    </tr>${notes ? `<tr><td colspan="5" style="font-family:${FONT};font-size:11.5px;color:${B.ink2};padding:0 6px 7px;border-bottom:1px solid ${B.line};">↳ ${notes}</td></tr>` : ''}`;
+  }).join('');
+  return `${secTitle(`② ใบเวรรายวัน · ${d.days.length} วัน`, 'เวลาเข้า-ออกที่ใช้คิดค่าเวร และค่ามือของแต่ละวัน')}
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border:1px solid ${B.line};border-radius:10px;">
+      <tr>${th('วันที่')}${th('เวลา')}${th('ชั่วโมง', 'right')}${th('ค่าเวร', 'right')}${th('ค่ามือ', 'right')}</tr>
+      ${body}
+      <tr>${td('<b>รวม</b>')}${td('')}${td(`<b>${hm(d.sumHrs, d.sumMins)}</b>`, 'right', 'white-space:nowrap;')}
+        ${td(`<b>${money(d.shiftTotal)}</b>`, 'right')}${td(`<b>${money(d.handTotal)}</b>`, 'right')}</tr>
+    </table>`;
+}
+
+/** ค่ามือรวมตามคอร์ส (แถวละเอียดทุกแถวอยู่ในไฟล์แนบ — ใส่ในเมลทั้งหมดจะยาวจน Gmail ตัดทิ้ง) */
+function procSummary(d: Detail) {
+  const g = new Map<string, { n: number; q: number; f: number }>();
+  d.procs.forEach((p) => {
+    const x = g.get(p.c) || { n: 0, q: 0, f: 0 };
+    x.n += 1; x.q += p.q; x.f += p.f; g.set(p.c, x);
+  });
+  const list = [...g.entries()].sort((a, b) => b[1].f - a[1].f);
+  const TOP = 25;
+  const rows = list.slice(0, TOP).map(([c, x]) => `
+    <tr>
+      <td style="font-family:${FONT};font-size:12.5px;color:${B.ink};padding:6px 6px;border-bottom:1px solid ${B.line};">${esc(c)}</td>
+      <td align="right" style="font-family:${FONT};font-size:12.5px;color:${B.ink2};padding:6px 6px;border-bottom:1px solid ${B.line};white-space:nowrap;">${x.n} ครั้ง</td>
+      <td align="right" style="font-family:${FONT};font-size:12.5px;color:${B.ink};padding:6px 6px;border-bottom:1px solid ${B.line};white-space:nowrap;">${money(x.f)}</td>
+    </tr>`).join('');
+  const rest = list.slice(TOP);
+  const restRow = rest.length ? `
+    <tr><td style="font-family:${FONT};font-size:12px;color:${B.ink3};padding:6px;">และอีก ${rest.length} คอร์ส</td>
+      <td align="right" style="font-family:${FONT};font-size:12px;color:${B.ink3};padding:6px;">${rest.reduce((a, [, x]) => a + x.n, 0)} ครั้ง</td>
+      <td align="right" style="font-family:${FONT};font-size:12px;color:${B.ink3};padding:6px;">${money(rest.reduce((a, [, x]) => a + x.f, 0))}</td></tr>` : '';
+  return `${secTitle(`③ ค่ามือแยกตามคอร์ส · ${d.procs.length.toLocaleString('th-TH')} รายการ`,
+      'รายการทุกแถว (วันที่ · เลขที่เอกสาร · คอร์ส · จำนวน · ค่ามือ) อยู่ในไฟล์แนบ เปิดด้วย Excel ได้')}
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border:1px solid ${B.line};border-radius:10px;">
+      ${rows}${restRow}
+      <tr><td style="font-family:${FONT};font-size:12.5px;font-weight:700;padding:7px 6px;">รวมค่ามือ</td><td></td>
+        <td align="right" style="font-family:${FONT};font-size:12.5px;font-weight:700;padding:7px 6px;">${money(d.handTotal)}</td></tr>
+    </table>`;
+}
+
+export function detailHtml(d?: Detail | null) {
+  if (!d || !Array.isArray(d.days)) return '';
+  return `${breakdown(d)}${dayTable(d)}${d.procs.length ? procSummary(d) : ''}
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:18px 0 6px;">
+      <tr><td style="background:${B.sageLt};border-radius:10px;padding:12px 14px;font-family:${FONT};font-size:12.5px;line-height:1.7;color:${B.ink2};">
+        📎 <b>ไฟล์แนบ</b> มีรายละเอียดครบทุกบรรทัด (ใบเวรรายวัน + ค่ามือทุกรายการพร้อมเลขที่เอกสาร) ไว้ตรวจเทียบกับบิลได้
+        · หากพบรายการไม่ถูกต้อง กรุณา<b>ยังไม่ต้องเซ็น</b> และแจ้งฝ่ายบุคคล
+      </td></tr>
+    </table>`;
+}
+
+/** ไฟล์ CSV (เปิดใน Excel ภาษาไทยได้) — รายละเอียดครบทุกบรรทัด */
+export function detailCsv(d: Detail, meta: { name: string; licNo: string; branchTh: string; ym: string }) {
+  const q = (v: unknown) => { const t = String(v ?? ''); return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+  const L: string[] = [];
+  const row = (...a: unknown[]) => L.push(a.map(q).join(','));
+  row('รายละเอียดค่าตอบแทนแพทย์ Mersi Clinic');
+  row('แพทย์', meta.name); row('เลข ว.', meta.licNo); row('สาขา', meta.branchTh); row('รอบเดือน', ymThaiFull(meta.ym));
+  row('');
+  row('สรุปยอด');
+  row('ค่าเวร', d.coverShift); row('ชั่วโมงรวม', `${d.sumHrs}:${String(d.sumMins).padStart(2, '0')}`); row('อัตรา/ชม.', d.rate);
+  row('ค่ามือ', d.handTotal); row('จำนวนรายการค่ามือ', d.procCount);
+  d.adjList.forEach((a) => row('ปรับปรุง', a.amount, a.reason || a.kind));
+  row('รวมเงินได้', d.gross); row('ฐานคิดภาษี', d.taxBaseAmt, TAX_BASE_TH[d.taxBase] || d.taxBase);
+  row(`ภาษีหัก ณ ที่จ่าย ${d.taxRate}%`, d.tax); row('หักอื่น ๆ', d.deduct); row('จ่ายสุทธิ', d.net);
+  row('');
+  row('ใบเวรรายวัน');
+  row('วันที่', 'เข้า', 'ออก', 'พัก(นาที)', 'ชั่วโมง', 'นาที', 'อัตรา', 'ค่าเวร', 'ค่ามือ', 'จำนวนรายการ', 'หัก', 'ประเภท', 'หมายเหตุ');
+  d.days.forEach((r) => row(r.d, r.in, r.out, r.brk, r.hrs, r.mins, r.rate, r.shift, r.hand, r.handRows, r.deduct,
+    KIND_TH[r.kind] || r.kind, [r.grace, r.note, r.special !== null && r.special !== undefined ? `ยอดพิเศษ ${r.special}` : ''].filter(Boolean).join(' · ')));
+  row('');
+  row('รายการค่ามือทั้งหมด');
+  row('วันที่ออกบิล', 'เลขที่เอกสาร', 'ชื่อคอร์ส', 'จำนวน', 'ค่ามือ');
+  d.procs.forEach((p) => row(p.d, p.doc, p.c, p.q, p.f));
+  row('', '', 'รวม', '', d.handTotal);
+  return '﻿' + L.join('\r\n');
+}
+
+/** base64 ของข้อความ UTF-8 (ใช้แนบไฟล์) */
+export function b64utf8(s: string) {
+  const bytes = new TextEncoder().encode(s);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
 
 /* ---------------------------------- โครงเมล ---------------------------------- */
 
@@ -233,6 +403,8 @@ export function buildMail(d: MailData): { subject: string; html: string } {
           ${amountCard(d.gross, d.tax, d.net)}
           ${noteBox(d.note)}
           ${button(d.signLink || '#', 'ตรวจสอบและเซ็นรับรอง')}
+          ${detailHtml(d.detail)}
+          ${d.detail ? button(d.signLink || '#', 'ตรวจครบแล้ว · เซ็นรับรอง') : ''}
           ${p(`เซ็นด้วยนิ้วบนมือถือได้เลย ไม่ต้องล็อกอิน · ลิงก์นี้ใช้ได้เฉพาะอาจารย์ท่านเดียว มีอายุ 14 วัน
             กรุณาอย่าส่งต่อให้ผู้อื่น`, `font-size:12.5px;color:${B.ink3};text-align:center;`)}`,
       }),
@@ -252,6 +424,7 @@ export function buildMail(d: MailData): { subject: string; html: string } {
             <b>${esc(monthFull)}</b> สาขา<b>${esc(d.branchTh)}</b> ตามไฟล์แนบครับ`)}
           ${attachmentRow(file)}
           ${amountCard(d.gross, d.tax, d.net)}
+          ${d.detail && Array.isArray(d.detail.days) ? breakdown(d.detail) : ''}
           ${noteBox(d.note)}
           ${p(`กรุณาเก็บไฟล์นี้ไว้ใช้ยื่นแบบภาษีเงินได้บุคคลธรรมดาประจำปี
             หากยอดไม่ตรงกับที่ได้รับ กรุณาติดต่อฝ่ายบัญชีครับ`, `font-size:13px;`)}`,
@@ -269,10 +442,41 @@ export function buildMail(d: MailData): { subject: string; html: string } {
         ${p(`สรุปการหักภาษี ณ ที่จ่ายสำหรับค่าตอบแทนประจำเดือน <b>${esc(monthFull)}</b>
           สาขา<b>${esc(d.branchTh)}</b> ดังนี้ครับ`)}
         ${amountCard(d.gross, d.tax, d.net)}
+        ${d.detail && Array.isArray(d.detail.days) ? breakdown(d.detail) : ''}
         ${noteBox(d.note)}
         ${p(`หนังสือรับรองการหักภาษี ณ ที่จ่าย (50 ทวิ) ฝ่ายบัญชีจะจัดส่งให้ตามรอบ
           หากมีข้อสงสัยกรุณาติดต่อฝ่ายบัญชีได้เลยครับ`, `font-size:13px;`)}`,
     }),
+  };
+}
+
+/** ข้อมูลตัวอย่างสำหรับเมลทดสอบ — ทุกตัวเลขบวกกันได้จริง */
+export function sampleDetail(ym: string): Detail {
+  const days = [2, 5, 9, 12, 16, 19, 23, 30].map((dd, i) => ({
+    d: `${ym}-${String(dd).padStart(2, '0')}`, in: i === 3 ? '12:10' : '12:00', out: '20:00', brk: 0,
+    hrs: 8, mins: 0, rate: 900, shift: i === 7 ? 5400 : 7200, hand: 0, handRows: 0, deduct: 0, special: null,
+    kind: 'SHIFT', note: '', grace: i === 3 ? 'สาย 10 นาที ไม่เกิน 15 นาที นับเต็มชั่วโมง' : '',
+  }));
+  days[7] = { ...days[7], hrs: 6, out: '18:00', note: 'ออกก่อนเวลา (แจ้งล่วงหน้า)' };
+  const courses = [['Toxin MBTox 50 Unit', 300], ['Filler Juvederm 1cc', 1500], ['ULTRATIGHT MPT 100 Shots', 1800],
+    ['Treatment RF 30 นาที', 150], ['Sculptra 1 ขวด', 3000], ['Botox กราม 50 Unit', 400]] as const;
+  const procs: Detail['procs'] = [];
+  let left = 34800;
+  let k = 0;
+  while (left > 0) {
+    const [c, f0] = courses[k % courses.length];
+    const f = Math.min(f0, left);
+    const day = days[k % days.length];
+    procs.push({ d: day.d, doc: `CD${String(3800 + k).padStart(6, '0')}`, c, q: 1, f });
+    day.hand += f; day.handRows += 1; left -= f; k++;
+  }
+  return {
+    rate: 900, taxBase: 'SHIFT', taxRate: 3, taxBaseAmt: 55800, sumHrs: 62, sumMins: 0,
+    shiftTotal: 55800, coverShift: 55800, handTotal: 34800, adjAdd: 8700, adjDeduct: 0,
+    adjList: [{ kind: 'ADD', amount: 8700, reason: 'ค่าเดินทางต่างสาขา (ตัวอย่าง)' }],
+    gross: 99300, tax: 1674, deduct: 0, net: 97626,
+    payeeType: 'PERSON', payeeName: '', bank: 'SCB', bankAcc: '118-219790-7',
+    procCount: procs.length, days, procs,
   };
 }
 
@@ -284,7 +488,7 @@ export function buildMail(d: MailData): { subject: string; html: string } {
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-application-name',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 const json = (b: unknown, s = 200) =>
@@ -310,8 +514,20 @@ async function sendResend(apiKey: string, from: string, to: string, subject: str
   }
 }
 
+// ครอบทั้งหมดด้วย try/catch — ถ้าโค้ดพังกลางทาง ต้องตอบกลับพร้อม CORS header เสมอ
+// ไม่งั้นเบราว์เซอร์จะเห็นแค่ "Failed to send a request to the Edge Function" โดยไม่รู้สาเหตุ
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS });
+  try {
+    return await handle(req);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error('fee-send-email crashed:', msg);
+    return json({ error: `ระบบส่งเมลขัดข้อง: ${msg}` }, 500);
+  }
+});
+
+async function handle(req: Request): Promise<Response> {
   if (req.method !== 'POST') return json({ error: 'ต้องเรียกด้วย POST' }, 405);
 
   const apiKey = Deno.env.get('RESEND_API_KEY');
@@ -328,7 +544,8 @@ Deno.serve(async (req) => {
   // client ที่ "เป็นตัวคนกด" — RPC จะเห็น auth.uid() ของคนนั้น แล้วตรวจสิทธิ์เอง
   const asUser = createClient(
     Deno.env.get('SUPABASE_URL')!,
-    Deno.env.get('SUPABASE_ANON_KEY')!,
+    // โปรเจกต์รุ่นใหม่บางตัวไม่มี SUPABASE_ANON_KEY — ใช้คีย์ publishable ที่หน้าเว็บส่งมาใน header แทน
+    Deno.env.get('SUPABASE_ANON_KEY') || req.headers.get('apikey') || Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '',
     { auth: { persistSession: false }, global: { headers: { Authorization: auth } } },
   );
 
@@ -353,18 +570,23 @@ Deno.serve(async (req) => {
 
     const { data: br } = await asUser.from('branches').select('name_th').eq('code', branch).maybeSingle();
     const f = body.testFile && body.testFile.content ? body.testFile : null;
+    const sample = sampleDetail(/^\d{4}-\d{2}$/.test(ym) ? ym : '2026-08');
     const mail = buildMail({
-      kind, test: true, appUrl, note,
+      kind, test: true, appUrl, note, detail: sample,
       name: 'นพ.ตัวอย่าง ทดสอบระบบ', licNo: '00000',
       branchTh: br?.name_th || branch || 'บางนา',
       ym: /^\d{4}-\d{2}$/.test(ym) ? ym : '2026-08',
-      gross: 99300, tax: 1044, net: 98256,
+      gross: sample.gross, tax: sample.tax, net: sample.net,
       signLink: `${appUrl}/sign/demo`,
       fileName: f ? String(f.filename) : 'ตัวอย่าง_50ทวิ.pdf',
     });
     const att = kind === 'wht_cert'
       ? [{ filename: f ? String(f.filename) : 'ตัวอย่าง_50ทวิ.pdf', content: f ? String(f.content) : SAMPLE_PDF }]
       : [];
+    att.push({
+      filename: 'ตัวอย่าง_รายละเอียดค่าตอบแทน.csv',
+      content: b64utf8(detailCsv(sample, { name: 'นพ.ตัวอย่าง ทดสอบระบบ', licNo: '00000', branchTh: br?.name_th || branch, ym })),
+    });
     const r = await sendResend(apiKey, from, to, mail.subject, mail.html, att);
     if (!r.ok) return json({ error: `ผู้ให้บริการอีเมลปฏิเสธ: ${r.error}` }, 502);
     return json({ ok: true, sent: 1, total: 1, results: [{ licNo: 'TEST', ok: true }], to });
@@ -391,6 +613,7 @@ Deno.serve(async (req) => {
 
   for (const d of (ctx.rows || []) as {
     licNo: string; name: string; email: string; gross: number; tax: number; net: number; inRound: boolean;
+    detail?: Detail | null;
   }[]) {
     const licNo = String(d.licNo);
     const email = String(d.email || '');
@@ -424,8 +647,15 @@ Deno.serve(async (req) => {
 
     const mail = buildMail({
       kind: action as MailKind, appUrl, note, name: d.name, licNo, branchTh, ym,
-      gross: d.gross, tax: d.tax, net: d.net, signLink, fileName,
+      gross: d.gross, tax: d.tax, net: d.net, signLink, fileName, detail: d.detail || null,
     });
+    // แนบไฟล์รายละเอียดทุกบรรทัด ให้แพทย์เปิดตรวจใน Excel ได้
+    if (d.detail && Array.isArray(d.detail.days)) {
+      attachments.push({
+        filename: `รายละเอียดค่าตอบแทน_ว.${licNo}_${ymThai(ym).replace(' ', '')}.csv`,
+        content: b64utf8(detailCsv(d.detail, { name: d.name, licNo, branchTh, ym })),
+      });
+    }
     const r = await sendResend(apiKey, from, email, mail.subject, mail.html, attachments);
     log.push({ licNo, toEmail: email, subject: mail.subject, ok: r.ok, providerId: r.id, error: r.error });
     results.push({ licNo, ok: r.ok, error: r.error || undefined });
@@ -440,4 +670,4 @@ Deno.serve(async (req) => {
 
   const sent = results.filter((r) => r.ok).length;
   return json({ ok: true, sent, total: results.length, results, logError });
-});
+}
