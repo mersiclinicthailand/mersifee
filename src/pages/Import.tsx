@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import type { Scope } from '../App';
-import { api, type Workspace } from '../lib/api';
+import { api, type Workspace, type ImportMode, type ImportHistRow } from '../lib/api';
 import { docNick, suggestDoctor, splitName, type DocLite, type Suggestion } from '../lib/names';
 import { useAuth } from '../lib/auth';
 import {
@@ -10,7 +10,35 @@ import {
 import {
   Alerts, BranchMonthPicker, Card, Money, Note, Skeleton, Stat, useAsync, YmLabel,
 } from '../components/ui';
-import { fmtMoney } from '../lib/core';
+import { fmtMoney, toIsoDate, toThaiDate, num, cellStr } from '../lib/core';
+
+/* ---------------- ช่วยเรื่องช่วงวันที่ของเดือน/สัปดาห์ ---------------- */
+const monthStart = (ym: string) => ym + '-01';
+function monthEnd(ym: string) {
+  const [y, m] = ym.split('-').map(Number);
+  const d = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  return ym + '-' + String(d).padStart(2, '0');
+}
+/** สัปดาห์ของเดือนแบบตายตัว 1–7 · 8–14 · 15–21 · 22–28 · 29–สิ้นเดือน (ตรงกับรอบตัดยอดรายสัปดาห์) */
+function weekBuckets(ym: string) {
+  const last = Number(monthEnd(ym).slice(8));
+  const out: { no: number; from: string; to: string }[] = [];
+  for (let d = 1, no = 1; d <= last; d += 7, no++) {
+    const e = Math.min(d + 6, last);
+    out.push({ no, from: ym + '-' + String(d).padStart(2, '0'), to: ym + '-' + String(e).padStart(2, '0') });
+  }
+  return out;
+}
+const weekNoOf = (iso: string) => Math.min(5, Math.floor((Number(iso.slice(8)) - 1) / 7) + 1);
+const dShort = (iso?: string | null) => (iso ? toThaiDate(iso) : '—');
+const MODE_TH: Record<string, string> = {
+  WEEK: 'รายสัปดาห์', MONTH_END: 'ปิดยอดสิ้นเดือน', FULL: 'ทั้งเดือน',
+};
+const STATUS_IMP: Record<string, { t: string; c: string }> = {
+  OK: { t: 'ใช้อยู่', c: 'ok' },
+  PARTIAL: { t: 'ถูกแทนบางส่วน', c: 'warn' },
+  REPLACED: { t: 'ถูกแทนที่แล้ว', c: 'none' },
+};
 
 export default function Import({ scope }: { scope: Scope }) {
   const { boot } = useAuth();
@@ -20,6 +48,13 @@ export default function Import({ scope }: { scope: Scope }) {
   const [skipHeader, setSkipHeader] = useState(false);
   const [headerWarn, setHeaderWarn] = useState<string | null>(null);
   const [preview, setPreview] = useState(false);
+  /* โหมดนำเข้า: รายสัปดาห์ (แทนเฉพาะช่วงวันที่) / ปิดยอดสิ้นเดือน (แทนทั้งเดือน) */
+  const [mode, setMode] = useState<ImportMode>('WEEK');
+  const [dFrom, setDFrom] = useState('');
+  const [dTo, setDTo] = useState('');
+  const [label, setLabel] = useState('');
+  const [hist, setHist] = useState<ImportHistRow[] | null>(null);
+  const [openHist, setOpenHist] = useState<string | null>(null);
   const { busy, err, msg, setErr, setMsg, run } = useAsync();
 
   const branchInfo = boot?.branches.find((b) => b.code === scope.branch);
@@ -40,7 +75,9 @@ export default function Import({ scope }: { scope: Scope }) {
 
   const reload = () => {
     setWs(null);
+    setHist(null);
     api.workspace(scope.branch, scope.ym).then(setWs).catch((e) => setErr(e.message));
+    api.importHistory(scope.branch, scope.ym).then(setHist).catch(() => setHist([]));
   };
   useEffect(reload, [scope.branch, scope.ym]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -56,6 +93,43 @@ export default function Import({ scope }: { scope: Scope }) {
   );
 
   const docRows = proc ? proc.rows.filter((r) => isDoctorName(r.emp)) : [];
+
+  /* ช่วงวันที่จริงในไฟล์ (เฉพาะแถวแพทย์) */
+  const fileRange = useMemo(() => {
+    if (!payload) return null;
+    const ds = (payload.rows as { billDate: string }[]).map((r) => r.billDate).filter(Boolean).sort();
+    return ds.length ? { min: ds[0], max: ds[ds.length - 1] } : null;
+  }, [payload]);
+  const effFrom = mode === 'WEEK' ? dFrom : monthStart(scope.ym);
+  const effTo = mode === 'WEEK' ? dTo : monthEnd(scope.ym);
+  const outOfRange = useMemo(() => {
+    if (!payload || !effFrom || !effTo) return 0;
+    return (payload.rows as { billDate: string }[])
+      .filter((r) => r.billDate && (r.billDate < effFrom || r.billDate > effTo)).length;
+  }, [payload, effFrom, effTo]);
+
+  /* ยอดค่ามือปัจจุบันแยกรายแพทย์ × สัปดาห์ */
+  const weekly = useMemo(() => {
+    if (!ws) return null;
+    const weeks = weekBuckets(scope.ym);
+    const nick: Record<string, string> = {};
+    ws.doctors.forEach((d) => { nick[cellStr(d.licNo)] = docNick(cellStr(d.nickName)) || cellStr(d.fullName); });
+    const byDoc: Record<string, number[]> = {};
+    const tot = weeks.map(() => 0);
+    ws.procDays.forEach((d) => {
+      const iso = toIsoDate(d.workDate);
+      if (!iso.startsWith(scope.ym)) return;
+      const lic = cellStr(d.licNo);
+      const w = weekNoOf(iso) - 1;
+      if (!byDoc[lic]) byDoc[lic] = weeks.map(() => 0);
+      byDoc[lic][w] += num(d.amount);
+      tot[w] += num(d.amount);
+    });
+    const rows = Object.keys(byDoc).map((lic) => ({
+      lic, name: nick[lic] || lic, w: byDoc[lic], sum: byDoc[lic].reduce((a, b) => a + b, 0),
+    })).sort((a, b) => b.sum - a.sum);
+    return { weeks, rows, tot, sum: tot.reduce((a, b) => a + b, 0) };
+  }, [ws, scope.ym]);
   const unmatchedNow = ws?.period?.unmatched || [];
 
   useEffect(() => {
@@ -99,6 +173,24 @@ export default function Import({ scope }: { scope: Scope }) {
     await run(async () => {
       const p = await parseProcFile(f);
       setProc(p);
+      // ตั้งช่วงวันที่ตามไฟล์ — ครอบทั้งเดือนจริง ๆ ให้แนะนำโหมดปิดยอดสิ้นเดือน
+      const ds = p.rows.filter((r) => isDoctorName(r.emp)).map((r) => toIsoDate(r.billDate))
+        .filter((x) => x && x.startsWith(scope.ym)).sort();
+      const ms = monthStart(scope.ym), me = monthEnd(scope.ym);
+      const lo = ds[0] || ms, hi = ds[ds.length - 1] || me;
+      const fullMonth = /ถึงวันที่\s*(\d+)/.test(p.header)
+        ? Number((p.header.match(/ถึงวันที่\s*(\d+)/) || [])[1]) === Number(me.slice(8)) && Number(lo.slice(8)) <= 7
+        : (Number(lo.slice(8)) <= 3 && Number(hi.slice(8)) >= Number(me.slice(8)) - 2);
+      setMode(fullMonth ? 'MONTH_END' : 'WEEK');
+      // ช่วงสัปดาห์: ขยายให้เต็มสัปดาห์มาตรฐาน (1–7, 8–14, …) ที่ครอบวันในไฟล์
+      const wb = weekBuckets(scope.ym);
+      const f0 = wb.find((w) => lo >= w.from && lo <= w.to)?.from || lo;
+      const t0 = wb.find((w) => hi >= w.from && hi <= w.to)?.to || hi;
+      setDFrom(f0 < ms ? ms : f0);
+      setDTo(t0 > me ? me : t0);
+      const wFrom = weekNoOf(f0 < ms ? ms : f0), wTo = weekNoOf(t0 > me ? me : t0);
+      setLabel(fullMonth ? 'ปิดยอดสิ้นเดือน'
+        : (wFrom === wTo ? `สัปดาห์ที่ ${wFrom}` : `สัปดาห์ที่ ${wFrom}–${wTo}`));
       const chk = checkHeader(p.header, branchInfo?.nameTh || '', scope.ym);
       if (!chk.ok) setHeaderWarn(chk.error!);
     });
@@ -110,11 +202,19 @@ export default function Import({ scope }: { scope: Scope }) {
       setErr('หัวรายงานไม่ตรงกับสาขา/เดือนที่เลือก — ถ้ายืนยันว่าถูกต้อง ให้ติ๊ก “ข้ามการตรวจหัวรายงาน”');
       return;
     }
+    if (mode === 'WEEK' && (!dFrom || !dTo || dFrom > dTo)) {
+      setErr('เลือกช่วงวันที่ของสัปดาห์ให้ถูกต้องก่อน');
+      return;
+    }
+    if (outOfRange > 0) {
+      setErr(`ไฟล์มี ${outOfRange} แถวที่วันที่อยู่นอกช่วงที่เลือก — ขยายช่วงวันที่ หรือเลือก “ปิดยอดสิ้นเดือน”`);
+      return;
+    }
     await run(async () => {
       const r = await api.importProc({
         branch: scope.branch, ym: scope.ym, rows: payload.rows,
         file: proc.fileName, hash: payload.fileHash,
-        unmatched: payload.unmatched, dupGroups: payload.dupGroups,
+        mode, dateFrom: effFrom, dateTo: effTo, label,
       });
       // จับคู่ให้อัตโนมัติเฉพาะชื่อที่ "ชื่อ-นามสกุลตรงกับทะเบียน" ชัดเจน
       // ที่เหลือ (ตรงแค่บางส่วน หรือต้องดึงจากคลัง) ปล่อยให้คนกดยืนยันเอง
@@ -128,7 +228,10 @@ export default function Import({ scope }: { scope: Scope }) {
       }
       setProc(null);
       reload();
-      setMsg(`นำเข้าแล้ว · อ่าน ${r.rowsRead.toLocaleString()} แถว · แถวแพทย์ ${r.rowsDoctor.toLocaleString()} แถว · ค่ามือ ${fmtMoney(r.sumDoctorFee)} บาท`
+      const diff = num(r.sumDoctorFee) - num(r.prevSum);
+      setMsg(`นำเข้า${MODE_TH[r.mode] || ''}แล้ว (${dShort(r.dateFrom)} – ${dShort(r.dateTo)})`
+        + ` · อ่าน ${r.rowsRead.toLocaleString()} แถว · แถวแพทย์ ${r.rowsDoctor.toLocaleString()} แถว · ค่ามือ ${fmtMoney(r.sumDoctorFee)} บาท`
+        + (num(r.prevSum) ? ` · ยอดเดิมช่วงนี้ ${fmtMoney(r.prevSum)} → ต่าง ${diff >= 0 ? '+' : ''}${fmtMoney(diff)}` : '')
         + (auto.length ? ` · จับคู่ชื่อให้อัตโนมัติ ${auto.length} คน: ${auto.join(', ')}` : ''));
     });
   }
@@ -353,9 +456,69 @@ export default function Import({ scope }: { scope: Scope }) {
                 </Note>
               )}
 
+              {/* ---------- ชนิดการนำเข้า ---------- */}
+              <div className="card" style={{ padding: 12, margin: '0 0 12px', background: 'var(--soft, transparent)' }}>
+                <div className="row" style={{ gap: 18, flexWrap: 'wrap', marginBottom: 8 }}>
+                  <label className="inline-field">
+                    <input type="radio" name="impmode" checked={mode === 'WEEK'}
+                      onChange={() => setMode('WEEK')} />
+                    <span><b>รายสัปดาห์</b> — แทนที่เฉพาะช่วงวันที่ที่เลือก</span>
+                  </label>
+                  <label className="inline-field">
+                    <input type="radio" name="impmode" checked={mode === 'MONTH_END'}
+                      onChange={() => setMode('MONTH_END')} />
+                    <span><b>ปิดยอดสิ้นเดือน</b> — ไฟล์ทั้งเดือน แทนที่ทั้งเดือน</span>
+                  </label>
+                </div>
+                {mode === 'WEEK' && (
+                  <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
+                    <label className="inline-field">
+                      <span>ตั้งแต่</span>
+                      <input type="date" value={dFrom} min={monthStart(scope.ym)} max={monthEnd(scope.ym)}
+                        onChange={(e) => setDFrom(e.target.value)} />
+                    </label>
+                    <label className="inline-field">
+                      <span>ถึง</span>
+                      <input type="date" value={dTo} min={monthStart(scope.ym)} max={monthEnd(scope.ym)}
+                        onChange={(e) => setDTo(e.target.value)} />
+                    </label>
+                    <div className="row" style={{ gap: 4 }}>
+                      {weekBuckets(scope.ym).map((w) => (
+                        <button key={w.no} className="sm" type="button"
+                          onClick={() => { setDFrom(w.from); setDTo(w.to); setLabel(`สัปดาห์ที่ ${w.no}`); }}
+                        >
+                          สัปดาห์ {w.no}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <label className="inline-field" style={{ marginTop: 8 }}>
+                  <span>ชื่อรอบ</span>
+                  <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="เช่น สัปดาห์ที่ 2" />
+                </label>
+                {fileRange && (
+                  <div className="muted" style={{ fontSize: '.82rem', marginTop: 6 }}>
+                    วันที่ในไฟล์: {dShort(fileRange.min)} – {dShort(fileRange.max)}
+                  </div>
+                )}
+              </div>
+
+              {outOfRange > 0 && (
+                <Note tone="bad">
+                  ไฟล์มี {outOfRange} แถวที่วันที่อยู่นอกช่วง {dShort(effFrom)} – {dShort(effTo)}
+                  — ขยายช่วงวันที่ หรือเลือก “ปิดยอดสิ้นเดือน”
+                </Note>
+              )}
+
               <Note tone="warn">
-                จะนำเข้าเป็นข้อมูลของ <b>{branchInfo?.nameTh} · <YmLabel ym={scope.ym} /></b> และ
-                <b>แทนที่</b>ข้อมูลค่าหัตถการเดิมของรอบนี้ทั้งหมด
+                จะนำเข้าเป็นข้อมูลของ <b>{branchInfo?.nameTh} · <YmLabel ym={scope.ym} /></b>{' '}
+                {mode === 'WEEK' ? (
+                  <>และ<b>แทนที่เฉพาะวันที่ {dShort(effFrom)} – {dShort(effTo)}</b> — ข้อมูลวันอื่นของเดือนยังอยู่ครบ</>
+                ) : (
+                  <>และ<b>แทนที่</b>ข้อมูลค่าหัตถการทั้งเดือน (ปิดยอดสิ้นเดือน)</>
+                )}
+                {' '}· ยอดของไฟล์ที่นำเข้าก่อนหน้าทุกครั้งยังเก็บไว้ดูย้อนหลังได้ที่ “ประวัติการนำเข้า”
               </Note>
 
               <div className="row">
@@ -454,8 +617,52 @@ export default function Import({ scope }: { scope: Scope }) {
         </Card>
       </div>
 
-      {/* ---------- ประวัติการนำเข้า ---------- */}
-      <Card title="ประวัติการนำเข้าของรอบนี้">
+      {/* ---------- ยอดค่ามือรายสัปดาห์ (ข้อมูลที่ใช้คำนวณอยู่ตอนนี้) ---------- */}
+      <Card title="ยอดค่ามือรายสัปดาห์ (ข้อมูลปัจจุบันของรอบนี้)">
+        {!weekly ? <Skeleton rows={3} /> : weekly.rows.length === 0 ? (
+          <p className="muted" style={{ margin: 0 }}>ยังไม่มีข้อมูลค่าหัตถการในรอบนี้</p>
+        ) : (
+          <div className="tablewrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>แพทย์</th>
+                  {weekly.weeks.map((w) => (
+                    <th key={w.no} className="n">
+                      สัปดาห์ {w.no}<div className="muted" style={{ fontWeight: 400, fontSize: '.75rem' }}>
+                        {Number(w.from.slice(8))}–{Number(w.to.slice(8))}
+                      </div>
+                    </th>
+                  ))}
+                  <th className="n">รวมเดือน</th>
+                </tr>
+              </thead>
+              <tbody>
+                {weekly.rows.map((r) => (
+                  <tr key={r.lic}>
+                    <td>{r.name} <span className="muted">ว.{r.lic}</span></td>
+                    {r.w.map((v, i) => <td key={i} className="n"><Money v={v} dash /></td>)}
+                    <td className="n"><b><Money v={r.sum} /></b></td>
+                  </tr>
+                ))}
+                <tr className="total">
+                  <td>รวม</td>
+                  {weekly.tot.map((v, i) => <td key={i} className="n"><Money v={v} dash /></td>)}
+                  <td className="n"><Money v={weekly.sum} /></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        )}
+        {unmatchedNow.length > 0 && (
+          <p className="muted" style={{ marginBottom: 0 }}>
+            ไม่รวมยอดของชื่อที่ยังจับคู่ไม่ได้ {unmatchedNow.length} ชื่อ
+          </p>
+        )}
+      </Card>
+
+      {/* ---------- ประวัติการนำเข้า (เก็บยอดทุกไฟล์ถาวร) ---------- */}
+      <Card title="ประวัติการนำเข้าของรอบนี้ · ยอดแต่ละสัปดาห์เก็บไว้ถาวร">
         {!ws ? <Skeleton rows={3} /> : ws.imports.length === 0 ? (
           <p className="muted" style={{ margin: 0 }}>ยังไม่มีการนำเข้าข้อมูลในรอบนี้</p>
         ) : (
@@ -463,31 +670,84 @@ export default function Import({ scope }: { scope: Scope }) {
             <table>
               <thead>
                 <tr>
-                  <th>ชนิด</th><th>ไฟล์</th><th className="n">อ่านได้</th><th className="n">แถวแพทย์</th>
-                  <th className="n">ค่ามือรวม</th><th>สถานะ</th><th>โดย</th><th>เมื่อ</th>
+                  <th>ชนิด</th><th>รอบ / ช่วงวันที่</th><th>ไฟล์</th><th className="n">แถวแพทย์</th>
+                  <th className="n">ค่ามือของไฟล์</th><th className="n">ยอดเดิมในช่วง</th><th className="n">ต่าง</th>
+                  <th>สถานะ</th><th>โดย</th><th>เมื่อ</th><th></th>
                 </tr>
               </thead>
               <tbody>
-                {ws.imports.map((im, i) => (
-                  <tr key={i} style={im.status === 'REPLACED' ? { opacity: .5 } : undefined}>
-                    <td>{im.kind === 'PROC' ? 'ค่าหัตถการ' : 'ใบเวร'}</td>
-                    <td>{im.fileName}</td>
-                    <td className="n">{im.rowsRead.toLocaleString()}</td>
-                    <td className="n">{im.rowsDoctor.toLocaleString()}</td>
-                    <td className="n"><Money v={im.sumDoctorFee} /></td>
-                    <td>
-                      <span className={`pill ${im.status === 'OK' ? 'ok' : 'none'}`}>
-                        {im.status === 'OK' ? 'ใช้อยู่' : 'ถูกแทนที่'}
-                      </span>
-                    </td>
-                    <td>{im.by}</td>
-                    <td className="muted">{(im.at || '').replace('T', ' ').substring(0, 16)}</td>
-                  </tr>
-                ))}
+                {ws.imports.map((im, i) => {
+                  const st = STATUS_IMP[im.status] || { t: im.status, c: 'none' };
+                  const h = im.id ? (hist || []).find((x) => x.id === im.id) : undefined;
+                  const isOpen = !!im.id && openHist === im.id;
+                  const hasPrev = im.prevSum !== null && im.prevSum !== undefined;
+                  const diff = num(im.sumDoctorFee) - num(im.prevSum);
+                  return (
+                    <Fragment key={im.id || i}>
+                      <tr style={im.status === 'REPLACED' ? { opacity: .62 } : undefined}>
+                        <td>
+                          {im.kind === 'PROC' ? (MODE_TH[im.mode || 'FULL'] || 'ค่าหัตถการ') : 'ใบเวร'}
+                        </td>
+                        <td>
+                          {im.label && <b>{im.label}<br /></b>}
+                          <span className="muted">{dShort(im.dateFrom)} – {dShort(im.dateTo)}</span>
+                        </td>
+                        <td>{im.fileName}</td>
+                        <td className="n">{im.rowsDoctor.toLocaleString()}</td>
+                        <td className="n"><Money v={im.sumDoctorFee} /></td>
+                        <td className="n">{hasPrev ? <Money v={im.prevSum as number} dash /> : '—'}</td>
+                        <td className="n">
+                          {hasPrev && num(im.prevSum) !== 0
+                            ? <span className={diff === 0 ? 'muted' : ''}>{diff > 0 ? '+' : ''}{fmtMoney(diff)}</span>
+                            : '—'}
+                        </td>
+                        <td><span className={`pill ${st.c}`}>{st.t}</span></td>
+                        <td>{im.by}</td>
+                        <td className="muted">{(im.at || '').replace('T', ' ').substring(0, 16)}</td>
+                        <td>
+                          {h && h.doctors.length > 0 && (
+                            <button className="sm" onClick={() => setOpenHist(isOpen ? null : im.id!)}>
+                              {isOpen ? 'ซ่อน' : 'รายแพทย์'}
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                      {isOpen && h && (
+                        <tr>
+                          <td colSpan={11} style={{ background: 'var(--soft, transparent)' }}>
+                            <table>
+                              <thead>
+                                <tr><th>แพทย์</th><th className="n">วัน</th><th className="n">รายการ</th><th className="n">ค่ามือ</th></tr>
+                              </thead>
+                              <tbody>
+                                {h.doctors.map((d) => (
+                                  <tr key={d.licNo + d.name}>
+                                    <td>
+                                      {docNick(d.name) || d.name}{' '}
+                                      {d.licNo ? <span className="muted">ว.{d.licNo}</span>
+                                        : <span className="pill warn">ยังไม่จับคู่</span>}
+                                    </td>
+                                    <td className="n">{d.days}</td>
+                                    <td className="n">{d.rows}</td>
+                                    <td className="n"><Money v={d.amount} /></td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </div>
         )}
+        <p className="muted" style={{ marginBottom: 0 }}>
+          ไฟล์ที่ “ถูกแทนที่แล้ว” ไม่ถูกนำไปคำนวณ แต่ยอดรายแพทย์ของไฟล์นั้นยังเก็บไว้ในระบบตลอด
+          กด “รายแพทย์” เพื่อดูยอดของแต่ละสัปดาห์ย้อนหลัง
+        </p>
       </Card>
     </>
   );

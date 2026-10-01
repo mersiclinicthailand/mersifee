@@ -206,6 +206,7 @@ export default function Calc({ scope }: { scope: Scope }) {
                                     <td className="n"><Money v={r.net} /></td>
                                     <td className="muted">
                                       {r.error && <span className="pill block">{r.error}</span>}
+                                      {r.rateNote && <span className="pill warn" title={r.rateNote}>{r.rateNote}</span>}{' '}
                                       {[r.kind !== 'SHIFT' ? r.kind : '', r.graceNote, r.note]
                                         .filter(Boolean).join(' · ')}
                                     </td>

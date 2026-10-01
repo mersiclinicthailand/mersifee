@@ -5,7 +5,7 @@
  *   · แคชฝั่งเว็บผูกกับรอบ — สลับแท็บกลับมาที่เดิมไม่ยิงซ้ำ แก้ข้อมูลแล้วแคชหมดอายุทันที
  * ==========================================================================*/
 import { supabase } from './supabase';
-import type { CalcCtx, ShiftRow, DoctorRow, RateRow, SignRow, AdjustRow, ProcDayRow } from './calc';
+import type { CalcCtx, ShiftRow, DoctorRow, RateRow, SignRow, AdjustRow, ProcDayRow, PoolRateRow } from './calc';
 
 export interface Me {
   username: string; name: string; role: string; roleTh: string;
@@ -34,14 +34,28 @@ export interface Workspace {
   shifts: ShiftRow[];
   doctors: DoctorRow[];
   rates: RateRow[];
+  /** อัตราจากคลังรายชื่อแพทย์ ของแพทย์ที่อยู่ในรอบนี้ (ใช้เป็นอัตราสำรอง) */
+  poolRates?: PoolRateRow[];
   adjusts: AdjustRow[];
   signs: SignRow[];
   aliases: { alias: string; licNo: string; branch: string; confirmedBy: string; confirmedAt: string }[];
-  imports: {
-    kind: string; fileName: string; rowsRead: number; rowsDoctor: number; rowsOther: number;
-    sumDoctorFee: number; status: string; by: string; at: string; note: string;
-  }[];
+  imports: ImportLog[];
   history: { step: string; action: string; actor: string; at: string; note: string }[];
+}
+
+export type ImportMode = 'WEEK' | 'MONTH_END' | 'FULL';
+export interface ImportLog {
+  id?: string;
+  kind: string; fileName: string; rowsRead: number; rowsDoctor: number; rowsOther: number;
+  sumDoctorFee: number; status: string; by: string; at: string; note: string;
+  /** WEEK = รายสัปดาห์ (แทนเฉพาะช่วงวันที่) · MONTH_END = ปิดยอดสิ้นเดือน · FULL = ทั้งเดือนแบบเดิม */
+  mode?: ImportMode; dateFrom?: string | null; dateTo?: string | null;
+  /** ยอดค่ามือเดิมในช่วงวันที่เดียวกันก่อนนำเข้าไฟล์นี้ */
+  prevSum?: number | null; label?: string;
+}
+export interface ImportHistRow extends ImportLog {
+  id: string;
+  doctors: { licNo: string; name: string; amount: number; rows: number; days: number }[];
 }
 
 export interface DashRow {
@@ -164,6 +178,8 @@ export const api = {
       shifts: ws.shifts,
       doctors: ws.doctors,
       rates: ws.rates,
+      poolRates: ws.poolRates || [],
+      defaultRate: config.DEFAULT_HOURLY_RATE || '',
       adjusts: ws.adjusts,
       signs: ws.signs,
       signMode: config.REQUIRE_DOCTOR_SIGN || 'WARN',
@@ -176,17 +192,26 @@ export const api = {
   },
 
   /* -------------------------------- เขียน -------------------------------- */
+  /** นำเข้ารายงานค่าหัตถการ
+   *  WEEK = แทนที่เฉพาะแถวในช่วงวันที่ dateFrom–dateTo (สัปดาห์อื่นของเดือนอยู่ครบ)
+   *  MONTH_END = ปิดยอดสิ้นเดือน แทนที่ทั้งเดือน · ทุกไฟล์ถูกเก็บยอดไว้ดูย้อนหลังได้ตลอด */
   async importProc(p: {
     branch: string; ym: string; rows: unknown[]; file: string; hash: string;
-    unmatched: unknown[]; dupGroups: number;
+    mode: ImportMode; dateFrom?: string; dateTo?: string; label?: string;
   }) {
-    const r = await rpc('fee_import_proc', {
+    const r = await rpc('fee_import_proc2', {
       p_branch: p.branch, p_ym: p.ym, p_rows: p.rows, p_file: p.file, p_hash: p.hash,
-      p_unmatched: p.unmatched, p_dup_groups: p.dupGroups,
+      p_mode: p.mode, p_from: p.dateFrom || null, p_to: p.dateTo || null, p_label: p.label || '',
     });
     dropCache();
-    return r as { pid: string; rowsRead: number; rowsDoctor: number; rowsOther: number; sumDoctorFee: number };
+    return r as {
+      pid: string; rowsRead: number; rowsDoctor: number; rowsOther: number; sumDoctorFee: number;
+      prevSum: number; mode: ImportMode; dateFrom: string; dateTo: string;
+    };
   },
+
+  importHistory: (branch: string, ym: string) =>
+    rpc<ImportHistRow[]>('fee_import_history', { p_branch: branch, p_ym: ym }),
 
   async saveAlias(alias: string, licNo: string, branch: string, ym: string) {
     const r = await rpc('fee_save_alias', { p_alias: alias, p_lic: licNo, p_branch: branch, p_ym: ym });

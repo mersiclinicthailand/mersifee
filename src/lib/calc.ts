@@ -7,7 +7,9 @@
  * หลักการที่ห้ามเปลี่ยน:
  *   - ข้อมูลที่ยังไม่ส่ง ≠ ศูนย์
  *   - ค่ามือในรายงานต้นทางเป็น "ยอดของรายการ" ห้ามคูณจำนวนซ้ำ
- *   - ไม่มีอัตรา = หยุดคำนวณและแจ้งปัญหา ห้ามใช้ 0 แทน
+ *   - ไม่มีอัตราที่ตรงสาขา/วันที่ → ห้ามใช้ 0 แทน ให้ใช้อัตราสำรองตามลำดับ
+ *     (อัตราอื่นของแพทย์คนเดียวกัน → อัตราในคลังรายชื่อ → อัตรากลาง DEFAULT_HOURLY_RATE)
+ *     แล้วแจ้งเตือนพร้อมเหตุผล · บล็อก (NO_RATE) เฉพาะเมื่อไม่มีอัตราใดใช้ได้เลย
  *   - ห้ามปัดเศษรายบรรทัด ปัดจุดเดียวตอนคำนวณภาษี
  * ==========================================================================*/
 
@@ -23,10 +25,14 @@ export type Severity = 'block' | 'warn';
 export type IssueCode =
   | 'NO_RATE' | 'RATE_OVERLAP' | 'PROC_NO_SHIFT' | 'SHIFT_NO_PROC' | 'UNMATCHED_NAME'
   | 'TIME_INVALID' | 'TIME_TOOLONG' | 'TIME_OVERLAP' | 'SPECIAL_NOREASON' | 'NO_PAYEE'
-  | 'DUP_ROWS' | 'NO_IMPORT' | 'ZERO_CONFIRM' | 'NO_DOCTOR_SIGN' | 'SIGN_STALE' | 'CLOCK_OPEN';
+  | 'DUP_ROWS' | 'NO_IMPORT' | 'ZERO_CONFIRM' | 'NO_DOCTOR_SIGN' | 'SIGN_STALE' | 'CLOCK_OPEN'
+  | 'RATE_FALLBACK' | 'RATE_POOL' | 'RATE_DEFAULT';
 
 export const ISSUE_CODES: Record<IssueCode, { sev: Severity; msg: string }> = {
-  NO_RATE:          { sev: 'block', msg: 'ไม่พบอัตราค่าตอบแทนที่มีผลในวันที่ทำงาน' },
+  NO_RATE:          { sev: 'block', msg: 'ไม่พบอัตราค่าตอบแทนที่ใช้ได้เลย (และไม่ได้ตั้งอัตรากลาง DEFAULT_HOURLY_RATE)' },
+  RATE_FALLBACK:    { sev: 'warn',  msg: 'ไม่มีอัตราที่ตรงสาขา/วันที่ — ใช้อัตราอื่นของแพทย์คนนี้คำนวณไปก่อน' },
+  RATE_POOL:        { sev: 'warn',  msg: 'ยังไม่ได้ตั้งอัตราในทะเบียน — ใช้อัตราจากคลังรายชื่อแพทย์ (ชีตเดิม) คำนวณไปก่อน' },
+  RATE_DEFAULT:     { sev: 'warn',  msg: 'ไม่มีอัตราของแพทย์คนนี้เลย — ใช้อัตรากลางของระบบคำนวณไปก่อน' },
   RATE_OVERLAP:     { sev: 'block', msg: 'มีอัตราซ้อนช่วงวันที่เดียวกันมากกว่า 1 รายการ' },
   PROC_NO_SHIFT:    { sev: 'block', msg: 'มีรายการหัตถการในวันที่ไม่มีใบเวร' },
   SHIFT_NO_PROC:    { sev: 'warn',  msg: 'มีใบเวรแต่ไม่มีรายการหัตถการในวันนั้น' },
@@ -76,6 +82,8 @@ export interface SignRow {
   signedAt?: string; method?: string; dataHash?: string; fileUrl?: string; by?: string; note?: string;
 }
 
+export interface PoolRateRow { licNo?: string; rateHourly?: unknown; rateCode?: string; }
+
 export interface AdjustRow { licNo?: string; kind?: string; amount?: unknown; reason?: string; }
 
 export interface CalcCtx {
@@ -89,6 +97,10 @@ export interface CalcCtx {
   shifts: ShiftRow[];
   doctors: DoctorRow[];
   rates: RateRow[];
+  /** อัตราจากคลังรายชื่อแพทย์ (ชีตเดิม) — ใช้เป็นอัตราสำรองเมื่อยังไม่ได้ตั้งอัตราในทะเบียน */
+  poolRates?: PoolRateRow[];
+  /** อัตรากลาง/ชม. (config DEFAULT_HOURLY_RATE) — สำรองชั้นสุดท้าย · ว่าง/0 = ไม่ใช้ */
+  defaultRate?: unknown;
   adjusts?: AdjustRow[];
   signs?: SignRow[] | null;
   signMode?: string;
@@ -110,6 +122,8 @@ export interface CalcDayRow {
   handAuto?: number; handOverride?: number | null; handFee?: number; handRows?: number;
   deduct?: number; gross?: number; net?: number;
   special?: number | null; kind?: string; note?: string; graceNote?: string;
+  /** อัตราที่ใช้เป็นอัตราสำรอง พร้อมเหตุผล (ว่าง = อัตราตรงตามทะเบียน) */
+  rateNote?: string;
   source?: string; signed?: boolean; signedAt?: string;
 }
 
@@ -154,6 +168,13 @@ export interface PickedRate {
   rate: number; taxBase: string; taxRate: number; handMethod: string; id: string; ambiguous: boolean;
 }
 
+/** เลข ว. ในทะเบียนอัตราบางแถวพิมพ์ "ว.56186" — ตัดตัวอักษรนำหน้าออกให้ตรงกับทะเบียนแพทย์ */
+export function normLic(v: unknown): string {
+  const s = cellStr(v).trim();
+  if (s === '*') return s;
+  return s.replace(/^[^0-9A-Za-z]+/, '');
+}
+
 /** ลำดับการเลือกอัตรา: แพทย์+สาขา → แพทย์ → สาขา → อัตรากลาง
  *  ไม่พบอัตราที่มีผล → คืน null (ห้ามใช้ 0 แทน) */
 export function pickRate(
@@ -162,7 +183,7 @@ export function pickRate(
   const cand: RateRow[] = [];
   for (let i = 0; i < rates.length; i++) {
     const r = rates[i];
-    const rl = cellStr(r.licNo), rb = cellStr(r.branch);
+    const rl = normLic(r.licNo), rb = cellStr(r.branch);
     if (rl !== licNo && rl !== '*') continue;
     if (rb !== '' && rb !== branch) continue;
     const f = toIsoDate(r.effFrom), t = toIsoDate(r.effTo);
@@ -172,7 +193,7 @@ export function pickRate(
   }
   if (!cand.length) return null;
   const score = (r: RateRow) =>
-    (cellStr(r.licNo) === licNo ? 2 : 0) + (cellStr(r.branch) === branch ? 1 : 0);
+    (normLic(r.licNo) === licNo ? 2 : 0) + (cellStr(r.branch) === branch ? 1 : 0);
   cand.sort((a, b) => {
     const d = score(b) - score(a);
     if (d) return d;
@@ -192,6 +213,100 @@ export function pickRate(
     id: cellStr(top.id),
     ambiguous: tie > 1,
   };
+}
+
+const BR_ANY = 'ทุกสาขา';
+
+/** อธิบายว่าทำไมหาอัตราที่ตรงสาขา/วันที่ไม่เจอ — ให้คนอ่านแก้ทะเบียนได้ทันทีโดยไม่ต้องไล่หา */
+export function explainNoRate(rates: RateRow[], licNo: string, branch: string, isoDate: string): string {
+  const mine = rates.filter((r) => normLic(r.licNo) === licNo);
+  if (!mine.length) return 'ยังไม่มีอัตราของแพทย์คนนี้ในทะเบียนอัตราเลย';
+  const br = (r: RateRow) => cellStr(r.branch);
+  const inBranch = mine.filter((r) => br(r) === '' || br(r) === branch);
+  const parts: string[] = [];
+  if (!inBranch.length) {
+    const list = Array.from(new Set(mine.map((r) => br(r) || BR_ANY)));
+    parts.push('มีอัตราเฉพาะสาขา ' + list.join(', ') + ' (ยังไม่มีของสาขา ' + branch + ')');
+  } else {
+    const future = inBranch.filter((r) => toIsoDate(r.effFrom) && isoDate < toIsoDate(r.effFrom));
+    const ended = inBranch.filter((r) => toIsoDate(r.effTo) && isoDate > toIsoDate(r.effTo));
+    if (future.length) {
+      const f = future.map((r) => toIsoDate(r.effFrom)).sort()[0];
+      parts.push('มีอัตราแต่เริ่มมีผล ' + toThaiDate(f));
+    }
+    if (ended.length) {
+      const t = ended.map((r) => toIsoDate(r.effTo)).sort().reverse()[0];
+      parts.push('อัตราเดิมสิ้นสุดเมื่อ ' + toThaiDate(t));
+    }
+    if (!parts.length) parts.push('ไม่มีช่วงวันที่ของอัตราที่ครอบคลุมวันที่ทำงาน');
+  }
+  return parts.join(' · ');
+}
+
+export interface FallbackRate extends PickedRate {
+  code: 'RATE_FALLBACK' | 'RATE_POOL' | 'RATE_DEFAULT';
+  reason: string;     // ทำไมหาอัตราตรงไม่เจอ
+  source: string;     // อัตราสำรองมาจากไหน
+}
+
+function dayDiff(a: string, b: string): number {
+  return Math.abs((Date.parse(a + 'T00:00:00Z') - Date.parse(b + 'T00:00:00Z')) / 86400000);
+}
+
+/** หาอัตราสำรองเมื่อ pickRate คืน null
+ *  1) อัตราอื่นของแพทย์คนเดียวกัน — สาขาที่ตรง/ทุกสาขาก่อน แล้วเลือกช่วงวันที่ใกล้วันทำงานที่สุด
+ *  2) อัตราในคลังรายชื่อแพทย์ (ชีตเดิม)
+ *  3) อัตรากลางของระบบ (DEFAULT_HOURLY_RATE)
+ *  ไม่มีเลย → null (ยังบล็อก — ห้ามคิดเป็น 0) */
+export function fallbackRate(
+  rates: RateRow[], pool: PoolRateRow[], defaultRate: unknown,
+  licNo: string, branch: string, isoDate: string,
+): FallbackRate | null {
+  const reason = explainNoRate(rates, licNo, branch, isoDate);
+  const mine = rates.filter((r) => normLic(r.licNo) === licNo && num(r.hourlyRate) > 0);
+  if (mine.length) {
+    const dist = (r: RateRow) => {
+      const f = toIsoDate(r.effFrom), t = toIsoDate(r.effTo);
+      if (f && isoDate < f) return dayDiff(isoDate, f);
+      if (t && isoDate > t) return dayDiff(isoDate, t);
+      return 0;
+    };
+    const brOk = (r: RateRow) => (cellStr(r.branch) === '' || cellStr(r.branch) === branch ? 0 : 1);
+    const best = mine.slice().sort((a, b) =>
+      (brOk(a) - brOk(b)) || (dist(a) - dist(b))
+      || (toIsoDate(b.effFrom) < toIsoDate(a.effFrom) ? -1 : 1))[0];
+    const f = toIsoDate(best.effFrom), t = toIsoDate(best.effTo);
+    return {
+      code: 'RATE_FALLBACK', reason,
+      source: 'อัตรา ' + fmtMoney(num(best.hourlyRate)) + '/ชม. ของ' + (cellStr(best.branch) ? 'สาขา ' + cellStr(best.branch) : BR_ANY)
+        + (f ? ' (มีผล ' + toThaiDate(f) + (t ? ' – ' + toThaiDate(t) : '') + ')' : ''),
+      rate: num(best.hourlyRate),
+      taxBase: cellStr(best.taxBase) || TAX_BASE_DEFAULT,
+      taxRate: (best.taxRate === '' || best.taxRate === undefined) ? TAX_RATE_DEFAULT : num(best.taxRate),
+      handMethod: cellStr(best.handMethod) || 'SOURCE',
+      id: cellStr(best.id), ambiguous: false,
+    };
+  }
+  const p = (pool || []).find((x) => normLic(x.licNo) === licNo && num(x.rateHourly) > 0);
+  if (p) {
+    return {
+      code: 'RATE_POOL', reason,
+      source: 'อัตราในคลังรายชื่อ ' + fmtMoney(num(p.rateHourly)) + '/ชม.'
+        + (cellStr(p.rateCode) ? ' (' + cellStr(p.rateCode) + ')' : ''),
+      rate: num(p.rateHourly), taxBase: TAX_BASE_DEFAULT, taxRate: TAX_RATE_DEFAULT,
+      handMethod: 'SOURCE', id: '', ambiguous: false,
+    };
+  }
+  const d = num(defaultRate);
+  if (d > 0) {
+    return {
+      code: 'RATE_DEFAULT', reason,
+      source: 'อัตรากลาง ' + fmtMoney(d) + '/ชม. (ตั้งค่า DEFAULT_HOURLY_RATE)',
+      rate: d, taxBase: TAX_BASE_DEFAULT, taxRate: TAX_RATE_DEFAULT,
+      handMethod: 'SOURCE', id: '', ambiguous: false,
+    };
+  }
+  return null;
 }
 
 /* --------------------------- ลายเซ็นแพทย์ --------------------------- */
@@ -397,16 +512,27 @@ export function calcCore(ctx: CalcCtx): CalcResult {
     let taxBase: string | null = null;
     let taxRate: number | null = null;
     const usedKeys: Record<string, boolean> = {};
+    // รวมคำเตือนอัตราสำรองเป็นรายแพทย์ (1 ข้อต่อเหตุผล) แทนการแจ้งทีละวัน
+    const fbGroups: Record<string, { code: string; text: string; dates: string[] }> = {};
 
     shifts.forEach((sh) => {
       const date = toIsoDate(sh.workDate);
-      const pick = pickRate(ctx.rates, lic, branch, date);
+      let pick: PickedRate | null = pickRate(ctx.rates, lic, branch, date);
+      let rateNote = '';
       if (!pick) {
-        issue('NO_RATE', lic, toThaiDate(date), date);
-        rows.push({ date, error: 'ไม่มีอัตรา' });
-        // วันนี้มีใบเวรแล้ว ติดแค่เรื่องอัตรา — ไม่ต้องแจ้ง PROC_NO_SHIFT ซ้ำให้งง
-        usedKeys[lic + '|' + date] = true;
-        return;
+        const fb = fallbackRate(ctx.rates, ctx.poolRates || [], ctx.defaultRate, lic, branch, date);
+        if (!fb) {
+          issue('NO_RATE', lic, toThaiDate(date) + ' · ' + explainNoRate(ctx.rates, lic, branch, date), date);
+          rows.push({ date, error: 'ไม่มีอัตรา' });
+          // วันนี้มีใบเวรแล้ว ติดแค่เรื่องอัตรา — ไม่ต้องแจ้ง PROC_NO_SHIFT ซ้ำให้งง
+          usedKeys[lic + '|' + date] = true;
+          return;
+        }
+        pick = fb;
+        rateNote = 'อัตราสำรอง ' + fmtMoney(fb.rate) + '/ชม. — ' + fb.reason;
+        const gk = fb.code + '|' + fb.reason + '|' + fb.source;
+        if (!fbGroups[gk]) fbGroups[gk] = { code: fb.code, text: fb.reason + ' → ใช้' + fb.source, dates: [] };
+        fbGroups[gk].dates.push(date);
       }
       if (pick.ambiguous) issue('RATE_OVERLAP', lic, toThaiDate(date), date);
       if (rateUsed === null) { rateUsed = pick.rate; taxBase = pick.taxBase; taxRate = pick.taxRate; }
@@ -463,10 +589,16 @@ export function calcCore(ctx: CalcCtx): CalcResult {
         handAuto: r2(auto), handOverride: ov, handFee: r2(handFee), handRows: handRows[key] || 0,
         deduct, gross: r2(gross), net: r2(net),
         special, kind: cellStr(sh.kind) || 'SHIFT', note: cellStr(sh.note),
-        graceNote,
+        graceNote, rateNote,
         source: cellStr(sh.source) || 'MANUAL', signed: !!cellStr(sh.signId),
         signedAt: cellStr(sh.signedAt),
       });
+    });
+
+    Object.keys(fbGroups).forEach((gk) => {
+      const g = fbGroups[gk];
+      const days = g.dates.slice().sort();
+      issue(g.code, lic, g.text + ' · ' + days.length + ' วัน: ' + days.map(toThaiDate).join(', '), days[0]);
     });
 
     // ค่ามือในวันที่ไม่มีใบเวร → ต้องบล็อกก่อนอนุมัติ ไม่ให้ยอดหายเงียบ
@@ -480,7 +612,8 @@ export function calcCore(ctx: CalcCtx): CalcResult {
     });
 
     if (rateUsed === null) {
-      const pk = pickRate(ctx.rates, lic, branch, ym + '-01');
+      const pk = pickRate(ctx.rates, lic, branch, ym + '-01')
+        || fallbackRate(ctx.rates, ctx.poolRates || [], ctx.defaultRate, lic, branch, ym + '-01');
       if (pk) { rateUsed = pk.rate; taxBase = pk.taxBase; taxRate = pk.taxRate; }
     }
     if (rateUsed === null) { rateUsed = 0; taxBase = TAX_BASE_DEFAULT; taxRate = TAX_RATE_DEFAULT; }
