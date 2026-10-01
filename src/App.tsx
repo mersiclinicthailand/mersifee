@@ -1,4 +1,5 @@
 import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
+import { api } from './lib/api';
 import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { useAuth } from './lib/auth';
 import { visibleTabs } from './lib/tabs';
@@ -49,6 +50,15 @@ export default function App() {
 
   const scope: Scope = useMemo(() => ({ branch, ym, setBranch, setYm }), [branch, ym]);
 
+  /* จำนวนแพทย์ที่ต้องขึ้นทะเบียน/กรอกข้อมูล — แสดงเป็นตัวเลขแดงบนแท็บ “ทะเบียน”
+     โหลดใหม่ทุกครั้งที่เปลี่ยนหน้า (แคชในหน่วยความจำ จึงไม่ยิงซ้ำถ้าข้อมูลไม่เปลี่ยน) */
+  const [todoCount, setTodoCount] = useState(0);
+  const seeRegistry = !!boot && visibleTabs(boot.me.role, boot.me.tabs).some((t) => t.to === '/registry');
+  useEffect(() => {
+    if (!seeRegistry) return;
+    api.registryTodo().then((r) => setTodoCount(r.length)).catch(() => setTodoCount(0));
+  }, [seeRegistry, loc.pathname]);
+
   /** หน้าเซ็นของแพทย์เปิดจากลิงก์ในอีเมล ต้องเข้าได้ก่อนล็อกอิน
    *  จึงต้องตัดสินใจก่อนด่านตรวจสิทธิ์ทั้งหมด */
   if (loc.pathname.startsWith('/sign/')) {
@@ -95,6 +105,9 @@ export default function App() {
             className={({ isActive }) => (isActive ? 'on' : '')}
           >
             {t.label}
+            {t.to === '/registry' && todoCount > 0 && (
+              <span className="badge" title="แพทย์ที่ต้องขึ้นทะเบียน / กรอกข้อมูลให้ครบ">{todoCount}</span>
+            )}
           </NavLink>
         ))}
       </nav>

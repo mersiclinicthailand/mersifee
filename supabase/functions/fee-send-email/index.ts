@@ -499,6 +499,22 @@ const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i;
 /** PDF ตัวอย่างเล็ก ๆ สำหรับเมลทดสอบ 50 ทวิ (ถ้าผู้ทดสอบไม่ได้แนบไฟล์เอง) */
 const SAMPLE_PDF = 'JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUl0gL0NvdW50IDEgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCA1OTUgODQyXSAvUmVzb3VyY2VzIDw8IC9Gb250IDw8IC9GMSA1IDAgUiA+PiA+PiAvQ29udGVudHMgNCAwIFIgPj4KZW5kb2JqCjQgMCBvYmoKPDwgL0xlbmd0aCAyMjUgPj4Kc3RyZWFtCkJUIC9GMSAyMCBUZiA2MCA3NjAgVGQgKE1lcnNpIENsaW5pYyAtIFNBTVBMRSA1MCBUYXdpKSBUaiAwIC0zMCBUZCAvRjEgMTIgVGYgKFRoaXMgaXMgYSB0ZXN0IGF0dGFjaG1lbnQgZnJvbSB0aGUgTWVyc2lGZWUgZW1haWwgdGVzdC4pIFRqIDAgLTE4IFRkIChUaGUgcmVhbCBmaWxlIGlzIHRoZSB3aXRoaG9sZGluZyB0YXggY2VydGlmaWNhdGUgaXNzdWVkIGJ5IEFjY291bnRpbmcuKSBUaiBFVAplbmRzdHJlYW0KZW5kb2JqCjUgMCBvYmoKPDwgL1R5cGUgL0ZvbnQgL1N1YnR5cGUgL1R5cGUxIC9CYXNlRm9udCAvSGVsdmV0aWNhID4+CmVuZG9iagp4cmVmCjAgNgowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwMDkgMDAwMDAgbiAKMDAwMDAwMDA1OCAwMDAwMCBuIAowMDAwMDAwMTE1IDAwMDAwIG4gCjAwMDAwMDAyNDEgMDAwMDAgbiAKMDAwMDAwMDUxNyAwMDAwMCBuIAp0cmFpbGVyCjw8IC9TaXplIDYgL1Jvb3QgMSAwIFIgPj4Kc3RhcnR4cmVmCjU4NwolJUVPRgo=';
 
+/** แปลข้อผิดพลาดที่พบบ่อยของ Resend เป็นภาษาไทยพร้อมวิธีแก้ — คนกดส่งส่วนใหญ่ไม่ใช่ IT */
+function explainResend(msg: string, from: string): string {
+  if (/only send testing emails|verify a domain/i.test(msg)) {
+    return 'บัญชี Resend ยังอยู่โหมดทดลอง (ยังไม่ได้ยืนยันโดเมน) จึงส่งได้เฉพาะอีเมลเจ้าของบัญชี Resend เท่านั้น'
+      + ' — ส่งถึงแพทย์และ HR ไม่ได้จนกว่า IT จะยืนยันโดเมนที่ resend.com/domains'
+      + ' แล้วตั้งค่า FEE_MAIL_FROM เป็นอีเมลบนโดเมนนั้น (ตอนนี้ส่งจาก ' + from + ')';
+  }
+  if (/domain is not verified|not verified/i.test(msg)) {
+    return 'โดเมนของผู้ส่ง (' + from + ') ยังยืนยันไม่เสร็จที่ Resend — ตรวจ DNS ที่ resend.com/domains';
+  }
+  if (/api key is invalid|invalid api key|unauthori[sz]ed/i.test(msg)) {
+    return 'RESEND_API_KEY ไม่ถูกต้องหรือหมดอายุ — ให้ IT สร้าง key ใหม่แล้วตั้งใน Supabase secrets';
+  }
+  return msg;
+}
+
 async function sendResend(apiKey: string, from: string, to: string, subject: string, html: string,
   attachments: { filename: string; content: string }[] = []) {
   try {
@@ -508,7 +524,7 @@ async function sendResend(apiKey: string, from: string, to: string, subject: str
       body: JSON.stringify({ from, to: [to], subject, html, ...(attachments.length ? { attachments } : {}) }),
     });
     const jr = await r.json().catch(() => ({}));
-    return { ok: r.ok, id: jr?.id || '', error: r.ok ? '' : (jr?.message || jr?.error?.message || `HTTP ${r.status}`) };
+    return { ok: r.ok, id: jr?.id || '', error: r.ok ? '' : explainResend(jr?.message || jr?.error?.message || `HTTP ${r.status}`, from) };
   } catch (e) {
     return { ok: false, id: '', error: e instanceof Error ? e.message : String(e) };
   }

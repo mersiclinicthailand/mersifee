@@ -284,3 +284,13 @@ table input, table select { padding: 4px 7px; font-size: .84rem; border-radius: 
 /* แถววันนี้ และคอลัมน์สาขาที่กำลังเลือก ในตารางรวม */
 table tr.today > td { background: var(--sage-lt); }
 table th.on { background: var(--sage-lt); color: var(--sage-dk); }
+
+/* ตัวเลขแจ้งเตือนบนแท็บ (เช่น ทะเบียนที่ต้องกรอกข้อมูล) */
+.tabs .badge {
+  display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 5px;
+  border-radius: 9px; background: var(--bad); color: #fff;
+  font-size: .7rem; font-weight: 700; line-height: 18px; text-align: center; vertical-align: 1px;
+}
+.chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+.chips button.on { background: var(--sage-dk); color: #fff; border-color: var(--sage-dk); }
+.field.need input, .field.need textarea { border-color: var(--bad); background: var(--bad-bg); }

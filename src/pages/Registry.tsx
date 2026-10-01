@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
-import { api, type PoolRow, type PoolSearch } from '../lib/api';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { api, dropCache, type PoolRow, type PoolSearch, type RegTodo } from '../lib/api';
+import { toThaiDate } from '../lib/core';
 import { useAuth, can } from '../lib/auth';
 import { Alerts, Card, Money, Note, Skeleton, useAsync } from '../components/ui';
 import { docNick, rawNick } from '../lib/names';
@@ -26,6 +27,21 @@ const BLANK_RATE: Rate = {
   hand_method: 'SOURCE', eff_from: null, eff_to: null, note: '',
 };
 
+/** ช่องที่ต้องกรอก → ชื่อภาษาไทย */
+const FIELD_TH: Record<string, string> = {
+  full_name: 'ชื่อ-สกุล', bank: 'ธนาคาร', bank_acc: 'เลขบัญชี', id_card: 'เลขบัตรประชาชน',
+  address: 'ที่อยู่', email: 'อีเมล', payee_name: 'ชื่อผู้รับเงิน (นิติบุคคล)', inactive: 'สถานะพ้นสภาพแต่ยังมีงาน',
+};
+const KIND_TH: Record<string, { t: string; c: string }> = {
+  UNREGISTERED: { t: 'ยังไม่ขึ้นทะเบียน', c: 'block' },
+  POOL: { t: 'อยู่ในคลัง ยังไม่ขึ้นทะเบียน', c: 'block' },
+  UNKNOWN: { t: 'ชื่อในตารางแพทย์ ยังไม่รู้ว่าใคร', c: 'block' },
+  INCOMPLETE: { t: 'ข้อมูลไม่ครบ', c: 'warn' },
+};
+type TodoFilter = 'ALL' | 'REG' | 'INFO' | 'RATE';
+/** เดือน ym → ชื่อเดือนย่อ เช่น 2026-08 → ส.ค. 69 */
+const ymShort = (ym: string) => toThaiDate(ym + '-01').replace(/^1\s+/, '').replace(/\s+25(\d\d)$/, ' $1');
+
 const TAX_BASE_TH: Record<string, string> = {
   TOTAL: 'รวมเงินได้', SHIFT: 'เฉพาะค่าเวร', NONE: 'ไม่หักภาษี',
 };
@@ -45,11 +61,35 @@ export default function Registry() {
   const [pool, setPool] = useState<PoolSearch | null>(null);
   const [poolPick, setPoolPick] = useState<Set<string>>(new Set());
 
+  /* ---------- สิ่งที่ต้องทำในทะเบียน (แจ้งเตือน) ---------- */
+  const [todo, setTodo] = useState<RegTodo[] | null>(null);
+  const [tf, setTf] = useState<TodoFilter>('ALL');
+  const [need, setNeed] = useState<Set<string>>(new Set());   // ช่องที่ต้องกรอกของฟอร์มที่เปิดอยู่
+  const formRef = useRef<HTMLDivElement>(null);
+  const loadTodo = () => {
+    dropCache('todo');
+    api.registryTodo().then(setTodo).catch(() => setTodo([]));
+  };
+  useEffect(loadTodo, []);
+  const todoView = useMemo(() => (todo || []).filter((t) => {
+    if (tf === 'REG') return t.kind !== 'INCOMPLETE';
+    if (tf === 'INFO') return t.kind === 'INCOMPLETE' && t.missing.length > 0;
+    if (tf === 'RATE') return t.rateGaps.length > 0;
+    return true;
+  }), [todo, tf]);
+  const cnt = useMemo(() => ({
+    REG: (todo || []).filter((t) => t.kind !== 'INCOMPLETE').length,
+    INFO: (todo || []).filter((t) => t.kind === 'INCOMPLETE' && t.missing.length > 0).length,
+    RATE: (todo || []).filter((t) => t.rateGaps.length > 0).length,
+  }), [todo]);
+  const scrollToForm = () => setTimeout(() => formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
+
   const role = boot?.me.role;
   const mayDoc = can.registry(role);
   const mayRate = can.rates(role);
 
   const load = () => {
+    loadTodo();
     api.listDoctors().then((d) => setDocs(d as Doctor[])).catch((e) => setErr(e.message));
     api.listRates().then((r) => setRates(r as Rate[])).catch((e) => setErr(e.message));
   };
@@ -91,7 +131,7 @@ export default function Registry() {
       throw new Error('ต้องระบุรหัส ว. และชื่อ-สกุล');
     }
     await api.saveDoctor({ ...editDoc, lic_no: editDoc.lic_no.trim(), nick_name: rawNick(editDoc.nick_name) });
-    setEditDoc(null); load();
+    setEditDoc(null); setNeed(new Set()); load();
     setMsg('บันทึกทะเบียนแพทย์แล้ว');
   });
 
@@ -107,6 +147,35 @@ export default function Registry() {
     setMsg('บันทึกอัตราแล้ว — อัตราที่เปลี่ยนไม่กระทบรอบที่อนุมัติไปแล้ว');
   });
 
+  /* ปุ่มลัดจากรายการแจ้งเตือน */
+  const fixInfo = (t: RegTodo) => {
+    const d = docs?.find((x) => x.lic_no === t.licNo);
+    setTab('doc');
+    setNeed(new Set(t.missing));
+    setEditDoc(d ? { ...d, status: t.missing.includes('inactive') ? 'ACTIVE' : d.status }
+      : { ...BLANK_DOC, lic_no: t.licNo, nick_name: t.nick.replace(/^หมอ\s*/, ''), full_name: t.name });
+    scrollToForm();
+  };
+  const fixPool = (t: RegTodo) => run(async () => {
+    const r = await api.poolPromote([t.licNo]);
+    load();
+    setMsg(r.added
+      ? `ขึ้นทะเบียน ${t.nick || t.name} (ว.${t.licNo}) จากคลังแล้ว — ตรวจข้อมูลที่ยังขาดในรายการด้านบน`
+      : `ว.${t.licNo} มีในทะเบียนอยู่แล้ว`);
+  });
+  const fixRate = (t: RegTodo) => {
+    const gaps = t.rateGaps.slice().sort((a, b) => (a.ym < b.ym ? -1 : 1));
+    const brs = Array.from(new Set(gaps.map((g) => g.branch)));
+    setTab('rate');
+    setEditRate({
+      ...BLANK_RATE, lic_no: t.licNo,
+      branch: brs.length === 1 ? brs[0] : '',
+      eff_from: gaps[0] ? gaps[0].ym + '-01' : null,
+      note: brs.length > 1 ? `ทำงานหลายสาขา: ${brs.join(', ')}` : '',
+    });
+    scrollToForm();
+  };
+
   return (
     <>
       <div className="row" style={{ marginBottom: 12 }}>
@@ -117,6 +186,91 @@ export default function Registry() {
       </div>
 
       <Alerts err={err} msg={msg} />
+
+      {/* ---------- แจ้งเตือน: ต้องขึ้นทะเบียน / กรอกข้อมูล / ตั้งอัตรา ---------- */}
+      {todo && todo.length > 0 && (
+        <Card
+          title={<>🔔 ต้องดำเนินการในทะเบียน ({todo.length} คน)</>}
+          right={<span className="muted">ดูจากตารางแพทย์ · ใบเวร · ค่ามือ 3 เดือนล่าสุด</span>}
+        >
+          <div className="chips">
+            {([
+              ['ALL', `ทั้งหมด ${todo.length}`], ['REG', `ต้องขึ้นทะเบียน ${cnt.REG}`],
+              ['INFO', `ข้อมูลไม่ครบ ${cnt.INFO}`], ['RATE', `ยังไม่มีอัตรา ${cnt.RATE}`],
+            ] as [TodoFilter, string][]).map(([k, label]) => (
+              <button key={k} className={`sm ${tf === k ? 'on' : ''}`} onClick={() => setTf(k)}>{label}</button>
+            ))}
+          </div>
+          <div className="tablewrap" style={{ maxHeight: 420, overflow: 'auto' }}>
+            <table>
+              <thead>
+                <tr><th>แพทย์</th><th>สถานะ</th><th>สาขาที่มีงาน</th><th>ต้องเติม</th><th></th></tr>
+              </thead>
+              <tbody>
+                {todoView.map((t) => {
+                  const k = KIND_TH[t.kind];
+                  const gapsByBr: Record<string, string[]> = {};
+                  t.rateGaps.forEach((g) => { (gapsByBr[g.branch] = gapsByBr[g.branch] || []).push(g.ym); });
+                  return (
+                    <tr key={t.key}>
+                      <td>
+                        <b>{docNick(t.nick) || t.nick || '—'}</b>
+                        {t.licNo && <span className="muted"> · ว.{t.licNo}</span>}
+                        {t.name && <div className="muted" style={{ fontSize: '.8rem' }}>{t.name}</div>}
+                      </td>
+                      <td>
+                        <span className={`pill ${k.c}`}>{k.t}</span>
+                        {t.days ? <div className="muted" style={{ fontSize: '.78rem' }}>{t.days} เวรในตาราง</div> : null}
+                      </td>
+                      <td className="muted">{t.branches.join(', ')}<br />ล่าสุด {ymShort(t.lastYm)}</td>
+                      <td>
+                        {t.kind === 'UNREGISTERED' && (
+                          <span className="pill block">
+                            {t.inPool ? 'มีในคลังรายชื่อ — กดขึ้นทะเบียนได้เลย' : 'ไม่มีในคลัง — ต้องเพิ่มแพทย์ใหม่'}
+                          </span>
+                        )}
+                        {t.kind === 'POOL' && <span className="pill block">กดขึ้นทะเบียนจากคลัง แล้วจับคู่ตารางแพทย์ใหม่</span>}
+                        {t.kind === 'UNKNOWN' && (
+                          <span className="pill block">ไม่รู้เลข ว. — เพิ่มแพทย์ หรือแก้ชื่อในแท็บตารางแพทย์</span>
+                        )}
+                        {t.missing.map((m) => <span key={m} className="pill warn" style={{ marginRight: 4 }}>{FIELD_TH[m] || m}</span>)}
+                        {Object.keys(gapsByBr).length > 0 && (
+                          <div style={{ marginTop: 3, fontSize: '.8rem' }}>
+                            <span className="pill none">ไม่มีอัตรา</span>{' '}
+                            {Object.entries(gapsByBr).map(([b, ys]) => `${b} (${ys.sort().map(ymShort).join(', ')})`).join(' · ')}
+                          </div>
+                        )}
+                      </td>
+                      <td style={{ whiteSpace: 'nowrap' }}>
+                        {mayDoc && (t.kind === 'POOL' || (t.kind === 'UNREGISTERED' && t.inPool)) && (
+                          <button className="sm primary" disabled={busy} onClick={() => fixPool(t)}>ขึ้นทะเบียน</button>
+                        )}
+                        {mayDoc && ((t.kind === 'UNREGISTERED' && !t.inPool) || t.kind === 'UNKNOWN') && (
+                          <button className="sm primary" onClick={() => fixInfo(t)}>เพิ่มแพทย์</button>
+                        )}
+                        {mayDoc && t.kind === 'INCOMPLETE' && t.missing.length > 0 && (
+                          <button className="sm primary" onClick={() => fixInfo(t)}>กรอกข้อมูล</button>
+                        )}{' '}
+                        {mayRate && t.licNo && t.rateGaps.length > 0 && t.kind === 'INCOMPLETE' && (
+                          <button className="sm" onClick={() => fixRate(t)}>ตั้งอัตรา</button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+                {todoView.length === 0 && (
+                  <tr><td colSpan={5} className="muted">ไม่มีรายการในหมวดนี้ 🎉</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+          {!mayDoc && (
+            <p className="muted" style={{ marginBottom: 0 }}>
+              บทบาทของคุณดูได้อย่างเดียว — ส่งรายการนี้ให้ฝ่ายบุคคลกรอกข้อมูล
+            </p>
+          )}
+        </Card>
+      )}
 
       {tab === 'doc' && (
         <Card
@@ -278,7 +432,7 @@ export default function Registry() {
         >
           <Note tone="info">
             ลำดับการเลือกอัตรา: <b>แพทย์+สาขา → แพทย์ → สาขา → อัตรากลาง</b> ·
-            ไม่พบอัตราที่มีผลในวันที่ทำงาน ระบบจะ<b>หยุดคำนวณและแจ้งปัญหา</b> ไม่ใช้ 0 แทน ·
+            ไม่พบอัตราที่ตรงสาขา/วันที่ ระบบจะ<b>ใช้อัตราสำรองคำนวณไปก่อนและขึ้นคำเตือน</b> (ไม่ใช้ 0 แทน) ·
             เว้นรหัส ว. ว่าง = อัตรากลาง · เว้นสาขาว่าง = ทุกสาขา
           </Note>
           {!rates ? <Skeleton rows={5} /> : (
@@ -328,8 +482,14 @@ export default function Registry() {
       )}
 
       {/* ---------- ฟอร์มแก้ไขแพทย์ ---------- */}
+      <div ref={formRef} />
       {editDoc && (
-        <Card title={editDoc.lic_no ? `แก้ไข ${editDoc.lic_no}` : 'เพิ่มแพทย์ใหม่'}>
+        <Card title={editDoc.lic_no && docs?.some((d) => d.lic_no === editDoc.lic_no) ? `แก้ไข ${editDoc.lic_no}` : 'เพิ่มแพทย์ใหม่'}>
+          {need.size > 0 && (
+            <Note tone="warn">
+              ช่องที่ยังว่าง: {[...need].map((m) => FIELD_TH[m] || m).join(' · ')} — กรอกแล้วกดบันทึก
+            </Note>
+          )}
           <div className="grid g3">
             {([
               ['lic_no', 'รหัส ว.'], ['full_name', 'ชื่อ-สกุล'], ['nick_name', 'ชื่อเล่น'],
@@ -337,7 +497,7 @@ export default function Registry() {
               ['contact', 'เบอร์ติดต่อ'], ['email', 'อีเมล (ใช้ส่งหนังสือรับรองรายได้)'],
       ['payee_name', 'ชื่อผู้รับเงิน (ถ้าเป็นนิติบุคคล)'],
             ] as [keyof Doctor, string][]).map(([k, label]) => (
-              <div className="field" key={k}>
+              <div className={`field ${need.has(k) && !String(editDoc[k] ?? '').trim() ? 'need' : ''}`} key={k}>
                 <label>{label}</label>
                 <input
                   value={String(editDoc[k] ?? '')}
@@ -365,7 +525,7 @@ export default function Registry() {
               </select>
             </div>
           </div>
-          <div className="field">
+          <div className={`field ${need.has('address') && !editDoc.address?.trim() ? 'need' : ''}`}>
             <label>ที่อยู่</label>
             <textarea rows={2} value={editDoc.address}
               onChange={(e) => setEditDoc({ ...editDoc, address: e.target.value })}
@@ -373,7 +533,7 @@ export default function Registry() {
           </div>
           <div className="row">
             <button className="primary" onClick={saveDoc} disabled={busy}>บันทึก</button>
-            <button onClick={() => setEditDoc(null)}>ยกเลิก</button>
+            <button onClick={() => { setEditDoc(null); setNeed(new Set()); }}>ยกเลิก</button>
           </div>
         </Card>
       )}

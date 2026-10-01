@@ -58,6 +58,16 @@ export interface ImportHistRow extends ImportLog {
   doctors: { licNo: string; name: string; amount: number; rows: number; days: number }[];
 }
 
+export type RegTodoKind = 'UNREGISTERED' | 'POOL' | 'UNKNOWN' | 'INCOMPLETE';
+export interface RegTodo {
+  key: string; licNo: string; kind: RegTodoKind; name: string; nick: string; inPool: boolean;
+  branches: string[]; lastYm: string; days?: number;
+  /** ช่องที่ยังว่าง: full_name · bank · bank_acc · id_card · address · email · payee_name · inactive */
+  missing: string[];
+  /** สาขา/เดือนที่มีงาน แต่ยังไม่มีอัตราที่มีผลในเดือนนั้น */
+  rateGaps: { branch: string; ym: string }[];
+}
+
 export interface DashRow {
   code: string; nameTh: string; nameEn: string; status: string;
   procRows: number; procSum: number; doctors: number; shiftRows: number;
@@ -306,6 +316,9 @@ export const api = {
     dropCache();
     return r;
   },
+
+  /** แพทย์ที่ต้องขึ้นทะเบียน / กรอกข้อมูลให้ครบ / ตั้งอัตรา (ดูจากงานจริง 3 เดือนล่าสุด) */
+  registryTodo: () => cached('todo', () => rpc<RegTodo[]>('fee_registry_todo')),
 
   async listRates() {
     const { data, error } = await supabase.from('rate').select('*').order('lic_no').order('eff_from');
