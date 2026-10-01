@@ -58,6 +58,14 @@ export interface ImportHistRow extends ImportLog {
   doctors: { licNo: string; name: string; amount: number; rows: number; days: number }[];
 }
 
+export interface DoctorImportResult {
+  dry: boolean; mode: string; rows: number;
+  poolNew: number; poolChanged: number; poolSame: number; registered: number;
+  docChanges: { licNo: string; who: string; field: string; old: string; new: string }[];
+  docUpdated: number;
+  notInFile: { licNo: string; who: string }[];
+}
+
 export type RegTodoKind = 'UNREGISTERED' | 'POOL' | 'UNKNOWN' | 'INCOMPLETE';
 export interface RegTodo {
   key: string; licNo: string; kind: RegTodoKind; name: string; nick: string; inPool: boolean;
@@ -314,6 +322,16 @@ export const api = {
       'fee_pool_promote', { p_lic_nos: licNos },
     );
     dropCache();
+    return r;
+  },
+
+  /** นำเข้าทะเบียนแพทย์จากไฟล์ Excel "Data หมอ Update"
+   *  dry = true → คืนผลเปรียบเทียบอย่างเดียว · skip = ["เลข ว.|ชื่อช่อง"] ที่ไม่ต้องแก้ */
+  async doctorImport(rows: unknown[], mode: 'FILL' | 'OVERWRITE' | 'NONE', dry: boolean, file: string, skip: string[] = []) {
+    const r = await rpc<DoctorImportResult>('fee_doctor_import', {
+      p_rows: rows, p_doc_mode: mode, p_dry: dry, p_file: file, p_skip: skip,
+    });
+    if (!dry) dropCache();
     return r;
   },
 

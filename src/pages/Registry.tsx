@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { api, dropCache, type PoolRow, type PoolSearch, type RegTodo } from '../lib/api';
+import { api, dropCache, type PoolRow, type PoolSearch, type RegTodo, type DoctorImportResult } from '../lib/api';
+import { parseDoctorFile, type DoctorParsed } from '../lib/parse';
 import { toThaiDate } from '../lib/core';
 import { useAuth, can } from '../lib/auth';
 import { Alerts, Card, Money, Note, Skeleton, useAsync } from '../components/ui';
@@ -39,6 +40,20 @@ const KIND_TH: Record<string, { t: string; c: string }> = {
   INCOMPLETE: { t: 'ข้อมูลไม่ครบ', c: 'warn' },
 };
 type TodoFilter = 'ALL' | 'REG' | 'INFO' | 'RATE';
+type ImpMode = 'FILL' | 'OVERWRITE' | 'NONE';
+const digits = (v: string) => (v || '').replace(/\D/g, '');
+/** การเปลี่ยนที่น่าจะผิด → เอาติ๊กออกให้ก่อน (HR ติ๊กกลับเองได้)
+ *  เลขเหมือนเดิมแค่หายเลข 0 / ชื่อบริษัททับชื่อแพทย์ / ค่าใหม่สั้นกว่าและเป็นส่วนหนึ่งของค่าเดิม */
+function riskyChange(c: { field: string; old: string; new: string }): string {
+  if (!c.old) return '';
+  if (['bank_acc', 'id_card', 'contact'].includes(c.field)
+      && digits(c.old).replace(/^0+/, '') === digits(c.new).replace(/^0+/, '')) {
+    return digits(c.new).length < digits(c.old).length ? 'เลข 0 นำหน้าหาย' : 'ต่างแค่รูปแบบ';
+  }
+  if (c.field === 'full_name' && /^บริษัท|จำกัด/.test(c.new)) return 'เป็นชื่อบริษัท ไม่ใช่ชื่อแพทย์';
+  if (c.new.length < c.old.length && c.old.replace(/\s+/g, '').includes(c.new.replace(/\s+/g, ''))) return 'ข้อมูลใหม่สั้นกว่าเดิม';
+  return '';
+}
 /** เดือน ym → ชื่อเดือนย่อ เช่น 2026-08 → ส.ค. 69 */
 const ymShort = (ym: string) => toThaiDate(ym + '-01').replace(/^1\s+/, '').replace(/\s+25(\d\d)$/, ' $1');
 
@@ -83,6 +98,35 @@ export default function Registry() {
     RATE: (todo || []).filter((t) => t.rateGaps.length > 0).length,
   }), [todo]);
   const scrollToForm = () => setTimeout(() => formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
+
+  /* ---------- นำเข้าทะเบียนแพทย์จาก Excel ---------- */
+  const [impOpen, setImpOpen] = useState(false);
+  const [impFile, setImpFile] = useState<DoctorParsed | null>(null);
+  const [impMode, setImpMode] = useState<ImpMode>('FILL');
+  const [impPrev, setImpPrev] = useState<DoctorImportResult | null>(null);
+  const [impSkip, setImpSkip] = useState<Set<string>>(new Set());
+  const [impShow, setImpShow] = useState<'' | 'skip' | 'warn' | 'dup'>('');
+
+  const impPreview = (parsed: DoctorParsed, mode: ImpMode) => run(async () => {
+    setImpPrev(null);
+    const r = await api.doctorImport(parsed.rows, mode, true, parsed.fileName);
+    setImpPrev(r);
+    setImpSkip(new Set(r.docChanges.filter((c) => riskyChange(c)).map((c) => `${c.licNo}|${c.field}`)));
+  });
+  const impPick = (f: File | null) => f && run(async () => {
+    setImpFile(null); setImpPrev(null); setImpShow('');
+    const p = await parseDoctorFile(f);
+    setImpFile(p);
+    await impPreview(p, impMode);
+  });
+  const impApply = () => impFile && run(async () => {
+    const r = await api.doctorImport(impFile.rows, impMode, false, impFile.fileName, [...impSkip]);
+    setImpFile(null); setImpPrev(null); setImpOpen(false);
+    load();
+    setMsg(`นำเข้าทะเบียนแพทย์แล้ว · ${r.rows} คนในไฟล์ · แพทย์ใหม่เข้าคลัง ${r.poolNew} · อัปเดตคลัง ${r.poolChanged}`
+      + ` · แก้ทะเบียน ${r.docUpdated} คน (${r.docChanges.length} ช่อง)`
+      + ' — แพทย์ที่มีงานแต่ยังไม่ขึ้นทะเบียนจะขึ้นในรายการ 🔔 ด้านบน');
+  });
 
   const role = boot?.me.role;
   const mayDoc = can.registry(role);
@@ -282,6 +326,11 @@ export default function Registry() {
               >
                 {poolOpen ? 'ปิดคลังรายชื่อ' : 'ดึงจากคลังรายชื่อ'}
               </button>
+              <button className={impOpen ? 'primary' : ''}
+                onClick={() => { setImpOpen(!impOpen); setImpFile(null); setImpPrev(null); }}
+              >
+                {impOpen ? 'ปิดนำเข้า' : '⬆ นำเข้าจาก Excel'}
+              </button>
               <button className="primary" onClick={() => setEditDoc({ ...BLANK_DOC })}>+ เพิ่มแพทย์</button>
             </div>
           )}
@@ -332,6 +381,134 @@ export default function Registry() {
                 </tbody>
               </table>
             </div>
+          )}
+        </Card>
+      )}
+
+      {/* ---------- นำเข้าทะเบียนแพทย์จาก Excel ---------- */}
+      {tab === 'doc' && impOpen && mayDoc && (
+        <Card title="นำเข้าทะเบียนแพทย์จาก Excel (ไฟล์ Data หมอ Update)">
+          <Note tone="info">
+            ใช้ไฟล์รูปแบบเดิมของ HR (ชีต “หมอทุกสาขา”: การันตีหมอ · วันเกิด · เลขว. · เลขบัตรประชาชน ·
+            ชื่อ-นามสกุล · ชื่อเล่น · เบอร์ติดต่อ · ที่อยู่ · ธนาคาร · เลขบัญชี · สาขา · Mail · หมายเหตุ) —
+            อ่านในเบราว์เซอร์ นำเข้าซ้ำได้ทุกครั้งที่อัปเดต ·
+            แพทย์ทุกคนในไฟล์เข้า<b>คลังรายชื่อ</b> ·
+            แพทย์ที่<b>ขึ้นทะเบียนแล้ว</b>จะแก้ตามโหมดที่เลือก · ระบบไม่ลบใครออก และไม่เอาค่าว่างทับข้อมูลเดิม
+          </Note>
+          <div className="row" style={{ gap: 16, flexWrap: 'wrap', marginBottom: 10 }}>
+            <input type="file" accept=".xlsx,.xls" disabled={busy}
+              onChange={(e) => impPick(e.target.files?.[0] || null)} />
+            {([
+              ['FILL', 'เติมเฉพาะช่องที่ยังว่าง (แนะนำ)'],
+              ['OVERWRITE', 'ทับด้วยข้อมูลในไฟล์'],
+              ['NONE', 'อัปเดตแค่คลัง ไม่แตะทะเบียน'],
+            ] as [ImpMode, string][]).map(([m, t]) => (
+              <label key={m} className="inline-field">
+                <input type="radio" name="impmode" checked={impMode === m} disabled={busy}
+                  onChange={() => { setImpMode(m); if (impFile) impPreview(impFile, m); }} />
+                <span>{t}</span>
+              </label>
+            ))}
+          </div>
+
+          {impFile && (
+            <>
+              <div className="grid g4" style={{ marginBottom: 10 }}>
+                <div className="stat"><div className="k">แถวในไฟล์</div><div className="v">{impFile.total}</div>
+                  <div className="s">ชีต {impFile.sheet}</div></div>
+                <div className="stat"><div className="k">แพทย์ที่นำเข้าได้</div><div className="v">{impFile.rows.length}</div>
+                  <div className="s">มีเลข ว. ถูกต้อง</div></div>
+                <div className="stat"><div className="k">แพทย์ใหม่ (เข้าคลัง)</div><div className="v">{impPrev ? impPrev.poolNew : '…'}</div>
+                  <div className="s">อัปเดตข้อมูลในคลัง {impPrev ? impPrev.poolChanged : '…'} คน</div></div>
+                <div className="stat"><div className="k">ขึ้นทะเบียนแล้ว</div><div className="v">{impPrev ? impPrev.registered : '…'}</div>
+                  <div className="s">จะแก้ {impPrev ? impPrev.docChanges.length - impSkip.size : '…'} ช่อง</div></div>
+              </div>
+
+              <div className="chips">
+                <button className={`sm ${impShow === 'skip' ? 'on' : ''}`} onClick={() => setImpShow(impShow === 'skip' ? '' : 'skip')}>
+                  ข้าม {impFile.skipped.length} แถว
+                </button>
+                <button className={`sm ${impShow === 'dup' ? 'on' : ''}`} onClick={() => setImpShow(impShow === 'dup' ? '' : 'dup')}>
+                  เลข ว. ซ้ำ {impFile.dups.length}
+                </button>
+                <button className={`sm ${impShow === 'warn' ? 'on' : ''}`} onClick={() => setImpShow(impShow === 'warn' ? '' : 'warn')}>
+                  ข้อควรตรวจ {impFile.warnings.length}
+                </button>
+              </div>
+              {impShow === 'skip' && (
+                <div className="tablewrap" style={{ maxHeight: 260, overflow: 'auto', marginBottom: 10 }}>
+                  <table><thead><tr><th className="n">แถว</th><th>เลข ว.</th><th>ชื่อ</th><th>เหตุผล</th></tr></thead>
+                    <tbody>{impFile.skipped.map((x) => (
+                      <tr key={x.row}><td className="n">{x.row}</td><td>{x.lic || '—'}</td><td>{x.name}</td><td className="muted">{x.reason}</td></tr>
+                    ))}</tbody></table>
+                </div>
+              )}
+              {impShow === 'dup' && (
+                <Note tone="warn">
+                  เลข ว. เดียวกันมีหลายแถว — ระบบใช้แถวที่ข้อมูลครบกว่า:{' '}
+                  {impFile.dups.map((d) => `ว.${d.lic} (แถว ${d.rows.join(', ')})`).join(' · ')}
+                </Note>
+              )}
+              {impShow === 'warn' && (
+                <div className="tablewrap" style={{ maxHeight: 260, overflow: 'auto', marginBottom: 10 }}>
+                  <table><thead><tr><th className="n">แถว</th><th>เลข ว.</th><th>ข้อควรตรวจ</th></tr></thead>
+                    <tbody>{impFile.warnings.map((x, i) => (
+                      <tr key={i}><td className="n">{x.row}</td><td>{x.lic}</td><td>{x.text}</td></tr>
+                    ))}</tbody></table>
+                </div>
+              )}
+
+              {impPrev && impPrev.docChanges.length > 0 && (
+                <>
+                  <h3 style={{ margin: '12px 0 6px' }}>ข้อมูลที่จะเปลี่ยนในทะเบียน ({impPrev.docChanges.length} ช่อง)</h3>
+                  <p className="muted" style={{ marginTop: 0 }}>
+                    เอาติ๊กออก = ไม่แก้ช่องนั้น · ระบบเอาติ๊กออกให้ก่อนในช่องที่น่าจะผิด (เช่น เลข 0 นำหน้าหาย, ชื่อบริษัททับชื่อแพทย์)
+                  </p>
+                  <div className="tablewrap" style={{ maxHeight: 360, overflow: 'auto' }}>
+                    <table>
+                      <thead><tr><th></th><th>แพทย์</th><th>ช่อง</th><th>เดิม</th><th>ใหม่จากไฟล์</th></tr></thead>
+                      <tbody>
+                        {impPrev.docChanges.map((c) => {
+                          const k = `${c.licNo}|${c.field}`;
+                          const risk = riskyChange(c);
+                          return (
+                            <tr key={k} style={impSkip.has(k) ? { opacity: .55 } : undefined}>
+                              <td>
+                                <input type="checkbox" checked={!impSkip.has(k)} disabled={busy}
+                                  onChange={() => setImpSkip((s) => {
+                                    const n = new Set(s); if (n.has(k)) n.delete(k); else n.add(k); return n;
+                                  })} />
+                              </td>
+                              <td>{docNick(c.who) || c.who} <span className="muted">ว.{c.licNo}</span></td>
+                              <td>{FIELD_TH[c.field] || (c.field === 'nick_name' ? 'ชื่อเล่น' : c.field === 'contact' ? 'เบอร์ติดต่อ' : c.field)}</td>
+                              <td className="muted">{c.old || <i>ว่าง</i>}</td>
+                              <td>{c.new}{risk && <> <span className="pill warn">{risk}</span></>}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+              {impPrev && impPrev.docChanges.length === 0 && impMode !== 'NONE' && (
+                <Note tone="ok">ข้อมูลแพทย์ที่ขึ้นทะเบียนแล้วตรงกับไฟล์ / ไม่มีช่องว่างให้เติม</Note>
+              )}
+              {impPrev && impPrev.notInFile.length > 0 && (
+                <p className="muted">
+                  แพทย์ในทะเบียนที่ไม่มีในไฟล์นี้ {impPrev.notInFile.length} คน (เพิ่มในระบบเอง) — ไม่ถูกลบ:{' '}
+                  {impPrev.notInFile.slice(0, 12).map((x) => `${docNick(x.who) || x.who} ว.${x.licNo}`).join(', ')}
+                  {impPrev.notInFile.length > 12 ? ' …' : ''}
+                </p>
+              )}
+
+              <div className="row" style={{ marginTop: 10 }}>
+                <button className="primary" disabled={busy || !impPrev} onClick={impApply}>
+                  ยืนยันนำเข้า {impFile.rows.length} คน
+                </button>
+                <button disabled={busy} onClick={() => { setImpFile(null); setImpPrev(null); }}>ยกเลิก</button>
+              </div>
+            </>
           )}
         </Card>
       )}

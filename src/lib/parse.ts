@@ -429,3 +429,152 @@ export async function parseRosterFile(file: File): Promise<RosterParsed> {
     cancelled: rows.filter((r) => r.status === 'ยกเลิก').length,
   };
 }
+
+/* ------------------------- ทะเบียนแพทย์ (Data หมอ Update) -------------------------
+ * ไฟล์ master รายชื่อแพทย์ของ HR — หัวตาราง: การันตีหมอ · วันเกิด · เลขว. · เลขบัตรประชาชน ·
+ * ชื่อ-นามสกุล · ชื่อเล่น · เบอร์ติดต่อ · ที่อยู่ · ธนาคาร · เลขบัญชี · สาขา · Mail · หมายเหตุ
+ * อ่านตามชื่อหัวคอลัมน์ (สลับลำดับคอลัมน์ได้) และข้ามแถวที่ไม่ใช่แพทย์จริง
+ * --------------------------------------------------------------------------------*/
+export interface DoctorImportRow {
+  lic_no: string; full_name: string; nick_name: string; birth_date: string | null;
+  id_card: string; contact: string; address: string; bank: string; bank_acc: string;
+  source_branch: string; email: string; note: string; rate_code: string; rate_hourly: number | null;
+}
+export interface DoctorParsed {
+  fileName: string; sheet: string; total: number;
+  rows: DoctorImportRow[];
+  skipped: { row: number; reason: string; name: string; lic: string }[];
+  dups: { lic: string; rows: number[] }[];
+  warnings: { row: number; lic: string; text: string }[];
+}
+
+const clean = (v: unknown) => cellStr(v).replace(/\s+/g, ' ').trim();
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i;
+
+/** "22 กรกฎาคม 2537" / "22 ก.ค. 2537" / Date → YYYY-MM-DD (ค.ศ.) */
+function thaiBirth(v: unknown): string | null {
+  if (v instanceof Date && !isNaN(v.getTime())) {
+    const y = v.getFullYear() > 2400 ? v.getFullYear() - 543 : v.getFullYear();
+    return `${y}-${pad2(v.getMonth() + 1)}-${pad2(v.getDate())}`;
+  }
+  const m = clean(v).match(/^(\d{1,2})\s*([^\s\d]+)\s*(\d{4})$/);
+  if (!m) return null;
+  let mi = TH_MONTHS_FULL.indexOf(m[2]);
+  if (mi < 0) mi = TH_MONTHS.indexOf(m[2]);
+  if (mi < 0) return null;
+  let y = Number(m[3]); if (y > 2400) y -= 543;
+  const d = Number(m[1]);
+  if (d < 1 || d > 31) return null;
+  return `${y}-${pad2(mi + 1)}-${pad2(d)}`;
+}
+
+/** เบอร์โทรที่ Excel เก็บเป็นตัวเลขจะหายเลข 0 นำหน้า → เติมคืน */
+function phone(v: unknown): string {
+  if (typeof v === 'number') {
+    const s = String(Math.round(v));
+    return (s.length === 9 || s.length === 8) ? '0' + s : s;
+  }
+  return clean(v);
+}
+
+export function parseDoctorAoa(aoa: unknown[][], fileName: string, sheet: string): DoctorParsed {
+  let hi = -1;
+  for (let i = 0; i < Math.min(aoa.length, 15); i++) {
+    const r = (aoa[i] || []).map(clean);
+    if (r.some((x) => /^เลข\s*ว/.test(x)) && r.some((x) => /ชื่อ.?นามสกุล|ชื่อ-สกุล/.test(x))) { hi = i; break; }
+  }
+  if (hi < 0) throw new Error('ไม่พบหัวตาราง — ต้องมีคอลัมน์ "เลขว." และ "ชื่อ-นามสกุล"');
+  const head = (aoa[hi] || []).map(clean);
+  const col = (...re: RegExp[]) => head.findIndex((h) => re.some((r) => r.test(h)));
+  const C = {
+    rate: col(/^การันตี/, /อัตรา/), birth: col(/^วันเกิด/), lic: col(/^เลข\s*ว/),
+    idc: col(/บัตรประชาชน/), name: col(/ชื่อ.?นามสกุล/, /ชื่อ-สกุล/), nick: col(/^ชื่อเล่น/),
+    tel: col(/^เบอร์/, /โทร/), addr: col(/^ที่อยู่/), bank: col(/^ธนาคาร$/), acc: col(/^เลขบัญชี/),
+    br: col(/^สาขา/), mail: col(/^mail$/i, /^e-?mail/i, /อีเมล/), note: col(/^หมายเหตุ/),
+  };
+  const at = (r: unknown[], i: number) => (i >= 0 ? r[i] : null);
+
+  const byLic: Record<string, { row: number; data: DoctorImportRow; filled: number }> = {};
+  const dupRows: Record<string, number[]> = {};
+  const skipped: DoctorParsed['skipped'] = [];
+  const warnings: DoctorParsed['warnings'] = [];
+  let total = 0;
+
+  for (let k = hi + 1; k < aoa.length; k++) {
+    const r = aoa[k] || [];
+    const name = clean(at(r, C.name));
+    let lic = clean(at(r, C.lic)).replace(/^ว\.?\s*/, '');
+    if (typeof at(r, C.lic) === 'number') lic = String(Math.round(at(r, C.lic) as number));
+    if (!name && !lic) continue;
+    total++;
+    const rowNo = k + 1;
+    if (!lic) { skipped.push({ row: rowNo, reason: 'ไม่มีเลข ว.', name, lic }); continue; }
+    if (!/^\d{3,6}(-\d{1,2})?$/.test(lic)) {
+      skipped.push({ row: rowNo, reason: 'ไม่ใช่เลข ว. (เช่น แถวแขวน/Agency)', name, lic });
+      continue;
+    }
+    if (!name) { skipped.push({ row: rowNo, reason: 'ไม่มีชื่อ-นามสกุล', name, lic }); continue; }
+
+    const rate = clean(at(r, C.rate));
+    const mRate = rate.match(/^(\d+)\s*\/\s*hr/i);
+    let email = clean(at(r, C.mail));
+    const note = clean(at(r, C.note));
+    if (!EMAIL_RE.test(email) && EMAIL_RE.test(note)) email = note;   // บางแถวพิมพ์อีเมลไว้ช่องหมายเหตุ
+    if (email && !EMAIL_RE.test(email)) {                            // หลายอีเมลในช่องเดียว → ใช้อันแรก
+      const first = email.split(/[\s,;/]+/).find((x) => EMAIL_RE.test(x));
+      if (first) {
+        warnings.push({ row: rowNo, lic, text: `มีหลายอีเมลในช่องเดียว — ใช้ ${first}` });
+        email = first;
+      }
+    }
+    if (email && !EMAIL_RE.test(email)) {
+      warnings.push({ row: rowNo, lic, text: `อีเมลไม่ถูกรูปแบบ "${email}" — ไม่นำเข้าช่องอีเมล` });
+      email = '';
+    }
+    const idRaw = at(r, C.idc);
+    let idCard = typeof idRaw === 'number' ? String(Math.round(idRaw)) : clean(idRaw);
+    // เลขผู้เสียภาษีนิติบุคคลขึ้นต้นด้วย 0 — Excel ที่เก็บเป็นตัวเลขจะตัด 0 ทิ้งเหลือ 12 หลัก
+    if (typeof idRaw === 'number' && idCard.length === 12) idCard = '0' + idCard;
+    if (idCard && idCard.replace(/\D/g, '').length !== 13) {
+      warnings.push({ row: rowNo, lic, text: `เลขบัตรประชาชนไม่ครบ 13 หลัก (${idCard})` });
+    }
+    const accRaw = at(r, C.acc);
+    const acc = typeof accRaw === 'number' ? String(Math.round(accRaw)) : clean(accRaw);
+    if (typeof accRaw === 'number' && acc.length < 10) {
+      warnings.push({ row: rowNo, lic, text: `เลขบัญชีเก็บเป็นตัวเลขใน Excel (${acc}) — อาจหายเลข 0 นำหน้า ตรวจกับสมุดบัญชี` });
+    }
+    const birthRaw = at(r, C.birth);
+    const data: DoctorImportRow = {
+      lic_no: lic, full_name: name, nick_name: clean(at(r, C.nick)),
+      birth_date: thaiBirth(birthRaw), id_card: idCard, contact: phone(at(r, C.tel)),
+      address: clean(at(r, C.addr)), bank: clean(at(r, C.bank)), bank_acc: acc,
+      source_branch: clean(at(r, C.br)), email, note: EMAIL_RE.test(note) ? '' : note,
+      rate_code: rate, rate_hourly: mRate ? Number(mRate[1]) : null,
+    };
+    const filled = Object.values(data).filter((v) => v !== '' && v !== null).length;
+    if (byLic[lic]) {
+      (dupRows[lic] = dupRows[lic] || [byLic[lic].row]).push(rowNo);
+      // เลข ว. ซ้ำ → เก็บแถวที่ข้อมูลครบกว่า (เท่ากัน = แถวล่าง)
+      if (filled >= byLic[lic].filled) byLic[lic] = { row: rowNo, data, filled };
+    } else {
+      byLic[lic] = { row: rowNo, data, filled };
+    }
+  }
+  const rows = Object.values(byLic).map((x) => x.data);
+  if (!rows.length) throw new Error('ไม่พบแถวแพทย์ที่มีเลข ว. ในไฟล์');
+  return {
+    fileName, sheet, total, rows, skipped, warnings,
+    dups: Object.entries(dupRows).map(([lic, rs]) => ({ lic, rows: rs })),
+  };
+}
+
+export async function parseDoctorFile(file: File): Promise<DoctorParsed> {
+  const { XLSX, wb } = await readWorkbook(file);
+  let last: unknown = null;
+  // ชีตแรกที่มีหัวตารางแพทย์ (ปกติคือ "หมอทุกสาขา")
+  for (const name of wb.SheetNames) {
+    const aoa = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, raw: true, defval: null }) as unknown[][];
+    try { return parseDoctorAoa(aoa, file.name, name); } catch (e) { last = e; }
+  }
+  throw last instanceof Error ? last : new Error('อ่านไฟล์ทะเบียนแพทย์ไม่ได้');
+}
