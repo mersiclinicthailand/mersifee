@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import type { Scope } from '../App';
 import { api, type Workspace } from '../lib/api';
 import { useAuth } from '../lib/auth';
@@ -22,6 +22,25 @@ const SOURCE_TH: Record<string, string> = {
 };
 
 type Row = ShiftRow & { _new?: boolean };
+type Doc = { licNo?: string; nickName?: string; fullName?: string };
+
+/** เรียงใบเวรเป็นกลุ่มรายแพทย์ (ชื่อเล่นตามตัวอักษรไทย) → วันที่ → เวลาเข้า
+ *  บรรทัดที่ยังไม่เลือกแพทย์อยู่ท้ายสุด */
+function sortRows(rows: Row[], docs: Doc[]): Row[] {
+  const nick: Record<string, string> = {};
+  docs.forEach((d) => { nick[cellStr(d.licNo)] = docNick(cellStr(d.nickName)) || cellStr(d.fullName); });
+  const key = (r: Row) => nick[cellStr(r.licNo)] || cellStr(r.licNo);
+  return rows.slice().sort((a, b) => {
+    const la = cellStr(a.licNo), lb = cellStr(b.licNo);
+    if (!la !== !lb) return la ? -1 : 1;
+    const n = key(a).localeCompare(key(b), 'th');
+    if (n) return n;
+    if (la !== lb) return la < lb ? -1 : 1;               // ชื่อเล่นซ้ำกัน (เช่น เต้ย 2 คน) แยกด้วยเลข ว.
+    const d = toIsoDate(a.workDate).localeCompare(toIsoDate(b.workDate));
+    if (d) return d;
+    return cellStr(a.timeIn).localeCompare(cellStr(b.timeIn));
+  });
+}
 
 export default function Shifts({ scope }: { scope: Scope }) {
   const { boot } = useAuth();
@@ -35,7 +54,7 @@ export default function Shifts({ scope }: { scope: Scope }) {
     api.workspace(scope.branch, scope.ym)
       .then((w) => {
         setWs(w);
-        setRows(w.shifts.map((s) => ({ ...s })));
+        setRows(sortRows(w.shifts.map((s) => ({ ...s })), w.doctors));
         setDirty(false);
       })
       .catch((e) => setErr(e.message));
@@ -63,14 +82,21 @@ export default function Shifts({ scope }: { scope: Scope }) {
     setDirty(true);
   };
 
+  /** เพิ่มบรรทัด — ถ้าระบุแพทย์ จะแทรกเข้ากลุ่มของแพทย์คนนั้นตามลำดับวันที่ */
   const addRow = (licNo = '', workDate = '') => {
-    setRows((rs) => [...rs, {
+    const nr: Row = {
       id: '', licNo, workDate, timeIn: '12:00', timeOut: '20:00', breakMin: 0,
       specialAmt: '', handOverride: '', deductOther: 0, kind: 'SHIFT', note: '',
       source: 'MANUAL', _new: true,
-    }]);
+    };
+    setRows((rs) => (licNo ? sortRows([...rs, nr], docs) : [...rs, nr]));
     setDirty(true);
   };
+  const nickOf = (lic: unknown) => {
+    const d = docs.find((x) => cellStr(x.licNo) === cellStr(lic));
+    return d ? (docNick(cellStr(d.nickName)) || '') : '';
+  };
+  const nameOf = (lic: unknown) => cellStr(docs.find((x) => cellStr(x.licNo) === cellStr(lic))?.fullName);
 
   const save = () => run(async () => {
     const payload = rows
@@ -148,6 +174,10 @@ export default function Shifts({ scope }: { scope: Scope }) {
         title={`ใบเวร ${rows.length} รายการ`}
         right={
           <div className="row">
+            <button onClick={() => setRows((rs) => sortRows(rs, docs))} disabled={!rows.length}
+              title="จัดเรียงใหม่หลังแก้แพทย์/วันที่">
+              ↕ เรียงตามแพทย์
+            </button>
             <button onClick={() => addRow()} disabled={locked}>+ เพิ่มบรรทัด</button>
             <button className="primary" onClick={save}
               disabled={busy || locked || !dirty || errors.length > 0}
@@ -162,15 +192,37 @@ export default function Shifts({ scope }: { scope: Scope }) {
             <table>
               <thead>
                 <tr>
-                  <th>แพทย์</th><th>วันที่</th><th>เข้า</th><th>ออก</th>
+                  <th>แพทย์</th><th>ชื่อเล่น</th><th>วันที่</th><th>เข้า</th><th>ออก</th>
                   <th className="n">พัก (นาที)</th><th>ประเภท</th>
                   <th className="n">ยอดพิเศษ</th><th className="n">แก้ค่ามือ</th>
                   <th className="n">หักอื่น ๆ</th><th>หมายเหตุ</th><th>ที่มา</th><th></th>
                 </tr>
               </thead>
               <tbody>
-                {rows.map((r, i) => (
-                  <tr key={i}>
+                {rows.map((r, i) => {
+                  const lic = cellStr(r.licNo);
+                  const first = i === 0 || cellStr(rows[i - 1].licNo) !== lic;
+                  const count = rows.filter((x) => cellStr(x.licNo) === lic).length;
+                  return (
+                  <Fragment key={i}>
+                  {first && (
+                    <tr className="group-row">
+                      <td colSpan={13} style={{ background: 'var(--sage-lt)', paddingTop: 7, paddingBottom: 7 }}>
+                        <div className="row" style={{ gap: 10 }}>
+                          <b>{lic ? (nickOf(lic) ? `หมอ${nickOf(lic)}` : `ว.${lic}`) : 'ยังไม่เลือกแพทย์'}</b>
+                          {lic && <span className="muted">ว.{lic} · {nameOf(lic)}</span>}
+                          <span className="pill none">{count} เวร</span>
+                          <div className="spacer" />
+                          {lic && (
+                            <button className="sm" disabled={locked} onClick={() => addRow(lic, '')}>
+                              + เพิ่มเวรหมอคนนี้
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                  <tr>
                     <td>
                       <select value={cellStr(r.licNo)} disabled={locked}
                         onChange={(e) => set(i, { licNo: e.target.value })}
@@ -183,6 +235,7 @@ export default function Shifts({ scope }: { scope: Scope }) {
                         ))}
                       </select>
                     </td>
+                    <td style={{ whiteSpace: 'nowrap' }}><b>{nickOf(r.licNo) || '—'}</b></td>
                     <td>
                       <input type="date" value={toIsoDate(r.workDate)} disabled={locked}
                         onChange={(e) => set(i, { workDate: e.target.value })}
@@ -243,9 +296,11 @@ export default function Shifts({ scope }: { scope: Scope }) {
                       </button>
                     </td>
                   </tr>
-                ))}
+                  </Fragment>
+                  );
+                })}
                 {rows.length === 0 && (
-                  <tr><td colSpan={12} className="muted">ยังไม่มีใบเวรในรอบนี้</td></tr>
+                  <tr><td colSpan={13} className="muted">ยังไม่มีใบเวรในรอบนี้</td></tr>
                 )}
               </tbody>
             </table>
