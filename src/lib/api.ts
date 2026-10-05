@@ -93,6 +93,11 @@ export interface MailRow {
   signed: boolean;
   lastMail: string | null; lastTaxMail: string | null;
 }
+export interface ClockSign {
+  id: number; licNo: string; workDate: string; mode: 'IN' | 'OUT'; time: string;
+  supervisor: string; signedAt: string; by: string;
+}
+
 export interface MailTargets {
   pid: string; branch: string; ym: string; status: string; rows: MailRow[];
 }
@@ -429,6 +434,17 @@ export const api = {
     if (data?.error) throw new Error(data.error);
     return data as { ok: true; to: string };
   },
+
+  /* -------------------- ลายเซ็นแพทย์ตอนเข้า/ออกเวร -------------------- */
+  clockSignAdd: (p: {
+    branch: string; licNo: string; date: string; mode: 'IN' | 'OUT'; time: string; png: string; supervisor: string;
+  }) => rpc<{ id: number }>('fee_clock_sign_add', {
+    p_branch: p.branch, p_lic: p.licNo, p_date: p.date, p_mode: p.mode, p_time: p.time,
+    p_png: p.png, p_supervisor: p.supervisor,
+  }),
+  clockSignList: (branch: string, ym: string) =>
+    rpc<ClockSign[]>('fee_clock_sign_list', { p_branch: branch, p_ym: ym }).catch(() => [] as ClockSign[]),
+  clockSignPng: (id: number) => rpc<string>('fee_clock_sign_png', { p_id: id }),
 
   /* ------------- หน้าเซ็นของแพทย์ (เรียกได้โดยไม่ต้องล็อกอิน) ------------- */
   signOpen: (token: string) => rpc<SignView>('fee_sign_open', { p_token: token }),

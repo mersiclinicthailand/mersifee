@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import type { Scope } from '../App';
-import { api, type Workspace, type RosterMonth } from '../lib/api';
+import { api, type Workspace, type RosterMonth, type ClockSign } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { monthHash, signStatus, type ShiftRow } from '../lib/calc';
 import { cellStr, minutesToHHMM, toIsoDate, toThaiDate, toMinutes } from '../lib/core';
@@ -32,6 +32,20 @@ const saveSup = (name: string) => {
     localStorage.setItem(SUP_KEY, JSON.stringify(list));
   } catch { /* ไม่เป็นไร */ }
 };
+/** ย่อรูปลายเซ็นให้เล็กลง (กว้าง 480px) ก่อนเก็บ — จาก ~60KB เหลือ ~8KB */
+function shrinkPng(dataUrl: string): Promise<string> {
+  return new Promise((res) => {
+    const img = new Image();
+    img.onload = () => {
+      const w = Math.min(480, img.width), h = Math.round(img.height * (w / img.width));
+      const c = document.createElement('canvas'); c.width = w; c.height = h;
+      const x = c.getContext('2d')!; x.fillStyle = '#fff'; x.fillRect(0, 0, w, h); x.drawImage(img, 0, 0, w, h);
+      res(c.toDataURL('image/png'));
+    };
+    img.onerror = () => res(dataUrl);
+    img.src = dataUrl;
+  });
+}
 const toMin = (t: string) => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
 export function supervisorsOf(note: string) {
   const inM = note.match(/เข้า (\d{1,2}:\d{2}) ดูแลโดย ([^·(]+)/);
@@ -43,7 +57,7 @@ const KINDS = [
   { v: 'MEETING', t: 'ประชุมประจำเดือน' }, { v: 'KOL', t: 'ค่าตอบแทน KOL' },
 ];
 interface Dlg { mode: 'in' | 'out'; licNo: string; name: string; time: string; by: string;
-  kind: string; brk: string; note: string; timeIn?: string }
+  kind: string; brk: string; note: string; timeIn?: string; sig?: string | null }
 
 export default function Clock({ scope }: { scope: Scope }) {
   const { boot } = useAuth();
@@ -157,6 +171,21 @@ export default function Clock({ scope }: { scope: Scope }) {
     });
   }
 
+  /* ---------- ลายเซ็นตอนเข้า/ออกเวร ---------- */
+  const [signs, setSigns] = useState<ClockSign[]>([]);
+  const loadSigns = () => { api.clockSignList(scope.branch, scope.ym).then(setSigns); };
+  useEffect(loadSigns, [scope.branch, scope.ym]); // eslint-disable-line react-hooks/exhaustive-deps
+  const [viewSig, setViewSig] = useState<{ title: string; png: string | null; meta: string } | null>(null);
+  const openSig = async (c: ClockSign, who: string) => {
+    setViewSig({ title: `${c.mode === 'IN' ? 'ลายเซ็นเข้าเวร' : 'ลายเซ็นออกเวร'} · ${who}`, png: null,
+      meta: `${toThaiDate(c.workDate)} · เวลา ${c.time} น. · ผู้ดูแล ${c.supervisor || '—'} · เซ็นเมื่อ ${c.signedAt} · บันทึกโดย ${c.by}` });
+    try { const png = await api.clockSignPng(c.id); setViewSig((v) => v && { ...v, png }); }
+    catch (e) { setErr(e instanceof Error ? e.message : String(e)); setViewSig(null); }
+  };
+  /** ลายเซ็นล่าสุดของแพทย์ในวัน/ชนิดนั้น */
+  const signOf = (lic: string, date: string, mode: 'IN' | 'OUT') =>
+    [...signs].reverse().find((c) => c.licNo === lic && c.workDate === date && c.mode === mode);
+
   /* ---------- กล่องลงเวลา: เลือกเวลา + ผู้ดูแล ---------- */
   const [dlg, setDlg] = useState<Dlg | null>(null);
   const [supList, setSupList] = useState<string[]>(loadSup);
@@ -184,17 +213,30 @@ export default function Clock({ scope }: { scope: Scope }) {
       return `เวลาออกต้องหลังเวลาเข้า (${d.timeIn}) — ถ้าเป็นเวรข้ามคืน เลือกประเภท “เวรข้ามคืน”`;
     }
     if (Number(d.brk) < 0 || Number.isNaN(Number(d.brk))) return 'เวลาพักไม่ถูกต้อง';
+    if (!d.sig) return 'ให้คุณหมอเซ็นชื่อในกรอบก่อน';
     return '';
   };
 
-  const confirmDlg = () => {
+  const confirmDlg = async () => {
     if (!dlg) return;
     const e = dlgError(dlg);
     if (e) { setErr(e); return; }
     const by = dlg.by.trim();
     saveSup(by); setSupList(loadSup());
     const d = dlg;
+    // เก็บลายเซ็นก่อน — ถ้าเก็บไม่ได้ ไม่บันทึกเวลา (ลงเวลาต้องมีลายเซ็นเสมอ)
+    try {
+      const png = await shrinkPng(d.sig!);
+      await api.clockSignAdd({
+        branch: scope.branch, licNo: d.licNo, date: today, mode: d.mode === 'in' ? 'IN' : 'OUT',
+        time: d.time, png, supervisor: by,
+      });
+    } catch (er) {
+      setErr(`บันทึกลายเซ็นไม่สำเร็จ: ${er instanceof Error ? er.message : String(er)}`);
+      return;
+    }
     setDlg(null);
+    loadSigns();
     if (d.mode === 'in') {
       writeShifts(
         (rows) => [...rows, {
@@ -336,6 +378,18 @@ export default function Clock({ scope }: { scope: Scope }) {
                   ) : (
                     <span className="pill none">ยังไม่ลงเวลา</span>
                   )}
+                  {(() => {
+                    const si = signOf(doc.licNo!, today, 'IN'), so = signOf(doc.licNo!, today, 'OUT');
+                    const who = docNick(doc.nickName) || doc.fullName || doc.licNo!;
+                    return (si || so || open || done.length) ? (
+                      <div style={{ marginTop: 6, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        {si ? <button className="sm" onClick={() => openSig(si, who)}>✍️ เซ็นเข้า {si.time} ✓</button>
+                          : (open || done.length) ? <span className="pill warn">ยังไม่มีลายเซ็นเข้า</span> : null}
+                        {so ? <button className="sm" onClick={() => openSig(so, who)}>✍️ เซ็นออก {so.time} ✓</button>
+                          : done.length ? <span className="pill warn">ยังไม่มีลายเซ็นออก</span> : null}
+                      </div>
+                    ) : null;
+                  })()}
                   {[...(open ? [open] : []), ...done].map((sh, i) => {
                     const sp = supervisorsOf(cellStr(sh.note));
                     return (sp.in || sp.out) ? (
@@ -478,13 +532,63 @@ export default function Clock({ scope }: { scope: Scope }) {
         )}
       </Card>
     
+      {/* ---------- ลายเซ็นลงเวลาของเดือน ---------- */}
+      <Card title={<>✍️ ลายเซ็นลงเวลา · <YmLabel ym={scope.ym} /> <span className="muted" style={{ fontWeight: 400 }}>({signs.length} ครั้ง)</span></>}>
+        {signs.length === 0 ? (
+          <p className="muted" style={{ margin: 0 }}>ยังไม่มีลายเซ็นลงเวลาในเดือนนี้ — ลายเซ็นจะเริ่มเก็บตั้งแต่กดเข้า/ออกเวรครั้งแรกหลังอัปเดต</p>
+        ) : (
+          <div className="tablewrap" style={{ maxHeight: 380, overflowY: 'auto' }}>
+            <table>
+              <thead><tr><th>วันที่</th><th>แพทย์</th><th>ชนิด</th><th>เวลา</th><th>ผู้ดูแล</th><th>เซ็นเมื่อ</th><th></th></tr></thead>
+              <tbody>
+                {[...signs].reverse().map((c) => {
+                  const d = (ws?.doctors || []).find((x) => x.licNo === c.licNo);
+                  const who = docNick(d?.nickName) || d?.fullName || c.licNo;
+                  return (
+                    <tr key={c.id}>
+                      <td>{toThaiDate(c.workDate)}</td>
+                      <td>ว.{c.licNo} · {who}</td>
+                      <td><span className={`pill ${c.mode === 'IN' ? 'ok' : 'rev'}`}>{c.mode === 'IN' ? 'เข้าเวร' : 'ออกเวร'}</span></td>
+                      <td className="tnum">{c.time}</td>
+                      <td>{c.supervisor || '—'}</td>
+                      <td className="muted">{c.signedAt}</td>
+                      <td><button className="sm" onClick={() => openSig(c, who)}>ดูลายเซ็น</button></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+
+      {viewSig && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(35,38,31,.45)', zIndex: 61,
+          display: 'grid', placeItems: 'center', padding: 16 }}
+          onClick={(e) => { if (e.target === e.currentTarget) setViewSig(null); }}
+        >
+          <div className="card" style={{ maxWidth: 520, width: '100%', margin: 0 }}>
+            <h3 style={{ marginTop: 0 }}>{viewSig.title}</h3>
+            <div style={{ border: '1px solid var(--line)', borderRadius: 10, background: '#fff', minHeight: 160,
+              display: 'grid', placeItems: 'center' }}
+            >
+              {viewSig.png ? <img src={viewSig.png} alt="ลายเซ็น" style={{ maxWidth: '100%' }} /> : <Skeleton rows={2} />}
+            </div>
+            <p className="muted" style={{ fontSize: '.85rem' }}>{viewSig.meta}</p>
+            <div className="row" style={{ justifyContent: 'flex-end' }}>
+              <button onClick={() => setViewSig(null)}>ปิด</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ---------- กล่องลงเวลา ---------- */}
       {dlg && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(35,38,31,.45)', zIndex: 60,
           display: 'grid', placeItems: 'center', padding: 16 }}
           onClick={(e) => { if (e.target === e.currentTarget) setDlg(null); }}
         >
-          <div className="card" style={{ maxWidth: 420, width: '100%', margin: 0 }}>
+          <div className="card" style={{ maxWidth: 460, width: '100%', margin: 0, maxHeight: '92vh', overflowY: 'auto' }}>
             <h3 style={{ marginTop: 0 }}>
               {dlg.mode === 'in' ? '🟢 เข้าเวร' : '🔴 ออกเวร'} · {dlg.name}
             </h3>
@@ -529,6 +633,11 @@ export default function Clock({ scope }: { scope: Scope }) {
               <label>หมายเหตุ (ไม่บังคับ)</label>
               <input value={dlg.note} placeholder="เช่น มาแทนหมอ… / รถติด / ออกก่อนเวลาแจ้งล่วงหน้า"
                 onChange={(e) => setDlg({ ...dlg, note: e.target.value })} />
+            </div>
+
+            <div className="field">
+              <label>✍️ ลายเซ็นคุณหมอ{dlg.mode === 'in' ? 'ตอนเข้าเวร' : 'ตอนออกเวร'} (บังคับ)</label>
+              <SignaturePad key={dlg.mode + dlg.licNo} onChange={(v) => setDlg((x) => x && { ...x, sig: v })} />
             </div>
 
             {dlgError(dlg) && <Note tone="warn">{dlgError(dlg)}</Note>}
