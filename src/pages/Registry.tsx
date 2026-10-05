@@ -175,7 +175,7 @@ export default function Registry() {
       throw new Error('ต้องระบุรหัส ว. และชื่อ-สกุล');
     }
     await api.saveDoctor({ ...editDoc, lic_no: editDoc.lic_no.trim(), nick_name: rawNick(editDoc.nick_name) });
-    setEditDoc(null); setNeed(new Set()); load();
+    setEditDoc(null); setNeed(new Set()); load(); loadTodo();
     setMsg('บันทึกทะเบียนแพทย์แล้ว');
   });
 
@@ -200,6 +200,15 @@ export default function Registry() {
       : { ...BLANK_DOC, lic_no: t.licNo, nick_name: t.nick.replace(/^หมอ\s*/, ''), full_name: t.name });
     scrollToForm();
   };
+  /** ชื่อในตารางแพทย์ที่ยังไม่รู้ว่าใคร → ผูกกับหมอที่มีในทะเบียนแล้ว */
+  const [assign, setAssign] = useState<Record<string, string>>({});
+  const assignLabel = (t: RegTodo, lic: string) => run(async () => {
+    const r = await api.rosterAssignLabel(t.nick, lic);
+    const d = (docs || []).find((x) => x.lic_no === lic);
+    loadTodo();
+    setMsg(`จับคู่ "${t.nick}" = ${docNick(d?.nick_name) || d?.full_name || ''} (ว.${lic}) แล้ว · เติมเลข ว. ให้ ${r.updated} เวรในตารางแพทย์`
+      + (r.aliases ? ' · จำชื่อนี้ไว้แล้ว ไฟล์ตารางเวรครั้งหน้าจับคู่เอง' : ''));
+  });
   const fixPool = (t: RegTodo) => run(async () => {
     const r = await api.poolPromote([t.licNo]);
     load();
@@ -289,8 +298,28 @@ export default function Registry() {
                         {mayDoc && (t.kind === 'POOL' || (t.kind === 'UNREGISTERED' && t.inPool)) && (
                           <button className="sm primary" disabled={busy} onClick={() => fixPool(t)}>ขึ้นทะเบียน</button>
                         )}
+                        {mayDoc && t.kind === 'UNKNOWN' && (
+                          <div style={{ display: 'flex', gap: 4, marginBottom: 4 }}>
+                            <select value={assign[t.key] || ''} style={{ maxWidth: 190 }}
+                              onChange={(e) => setAssign((a) => ({ ...a, [t.key]: e.target.value }))}
+                            >
+                              <option value="">— เป็นหมอที่มีอยู่แล้ว —</option>
+                              {(docs || []).slice().sort((a, b) => (a.nick_name || '').localeCompare(b.nick_name || '', 'th'))
+                                .map((d) => (
+                                  <option key={d.lic_no} value={d.lic_no}>
+                                    {docNick(d.nick_name) || d.full_name} · ว.{d.lic_no}
+                                  </option>
+                                ))}
+                            </select>
+                            <button className="sm primary" disabled={busy || !assign[t.key]}
+                              onClick={() => assignLabel(t, assign[t.key])}
+                            >จับคู่</button>
+                          </div>
+                        )}
                         {mayDoc && ((t.kind === 'UNREGISTERED' && !t.inPool) || t.kind === 'UNKNOWN') && (
-                          <button className="sm primary" onClick={() => fixInfo(t)}>เพิ่มแพทย์</button>
+                          <button className="sm" onClick={() => fixInfo(t)}>
+                            {t.kind === 'UNKNOWN' ? 'หรือ เพิ่มเป็นหมอใหม่' : 'เพิ่มแพทย์'}
+                          </button>
                         )}
                         {mayDoc && t.kind === 'INCOMPLETE' && t.missing.length > 0 && (
                           <button className="sm primary" onClick={() => fixInfo(t)}>กรอกข้อมูล</button>

@@ -297,21 +297,28 @@ export const api = {
       'fee_roster_set',
       { p_branch: branch, p_date: workDate, p_label: label, p_lic: licNo || null },
     );
-    dropCache('roster:');
+    dropCache('roster:'); dropCache('todo');
     return r;
   },
 
   /** จับคู่ชื่อในตารางแพทย์ใหม่ทั้งเดือน + ลบช่อง OFF ที่หลุดเข้ามา (ไม่ต้องนำเข้าไฟล์ซ้ำ) */
+  /** ผูก "ชื่อในตารางแพทย์" ที่ยังไม่รู้ว่าใคร เข้ากับแพทย์ในทะเบียน (ทุกช่องที่เขียนชื่อนี้) */
+  async rosterAssignLabel(label: string, licNo: string) {
+    const r = await rpc<{ updated: number; aliases: number }>('fee_roster_assign_label', { p_label: label, p_lic: licNo });
+    dropCache('roster:'); dropCache('todo');
+    return r;
+  },
+
   async rosterRematch(ym: string) {
     const r = await rpc<{ removedOff: number; matched: number; stillUnknown: number }>(
       'fee_roster_rematch', { p_ym: ym });
-    dropCache('roster:');
+    dropCache('roster:'); dropCache('todo');
     return r;
   },
 
   async rosterImport(ym: string, rows: unknown[]) {
     const r = await rpc<RosterImportResult>('fee_roster_import', { p_ym: ym, p_rows: rows });
-    dropCache('roster:');
+    dropCache('roster:'); dropCache('todo');
     return r;
   },
 
