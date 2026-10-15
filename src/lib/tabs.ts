@@ -8,7 +8,6 @@
  * การซ่อนแท็บเป็นเรื่องความสะดวกของหน้าจอเท่านั้น
  * สิทธิ์จริงบังคับที่ RLS และ RPC ในฐานข้อมูลเสมอ
  * ==========================================================================*/
-import { can } from './auth';
 
 export interface TabDef {
   to: string;
@@ -21,7 +20,8 @@ export interface TabDef {
 
 export const TABS: TabDef[] = [
   { to: '/',          label: 'ภาพรวม',      always: true },
-  { to: '/import',    label: 'นำเข้าข้อมูล', show: (r) => can.editData(r) },
+  // HR/บัญชีนำเข้าทั้งเดือนเพื่อตรวจทาน · พนักงานสาขานำเข้ารายวันที่หน้า "ลงเวลา" แทน
+  { to: '/import',    label: 'นำเข้าข้อมูล', show: (r) => ['admin', 'hr', 'acct', 'it'].includes(r) },
   { to: '/roster',    label: 'ตารางแพทย์' },
   { to: '/clock',     label: 'ลงเวลา' },
   { to: '/shifts',    label: 'ใบเวรแพทย์' },

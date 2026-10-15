@@ -8,6 +8,8 @@ import {
   Alerts, BranchMonthPicker, Card, Note, SignaturePad, Skeleton, StatusPill, useAsync, YmLabel,
 } from '../components/ui';
 import { docNick } from '../lib/names';
+import DailyProcImport from '../components/DailyProcImport';
+import { can } from '../lib/auth';
 
 /** เวลาที่บันทึกคือเวลาของเครื่องที่เปิดหน้าจอ แต่แสดงตามเขตเวลาไทยเสมอ */
 function nowHHMM() {
@@ -434,6 +436,15 @@ export default function Clock({ scope }: { scope: Scope }) {
       </Card>
 
       {/* ---------- รับรองใบเวลาประจำเดือน ---------- */}
+      {/* ---------- ผู้จัดการสาขา: นำเข้าค่ามือประจำวัน ---------- */}
+      {!myLic && can.editData(boot?.me.role) && (
+        <DailyProcImport
+          branch={scope.branch} ym={scope.ym} ws={ws}
+          branchTh={boot?.branches.find((b) => b.code === scope.branch)?.nameTh || ''}
+          onDone={load}
+        />
+      )}
+
       <Card title={<>รับรองใบเวลาประจำเดือน · <YmLabel ym={scope.ym} /></>}>
         {!ws ? <Skeleton rows={4} /> : (
           <div className="tablewrap">

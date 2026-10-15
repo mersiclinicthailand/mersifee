@@ -45,6 +45,7 @@ export default function Approve({ scope }: { scope: Scope }) {
   const blockers = res?.blockers || 0;
 
   const cur = ORDER.indexOf(status);
+  const hrAll = role === 'hr' || role === 'admin';
 
   /** ปุ่มไหนกดได้ — ฝั่งหน้าจอเป็นแค่ความสะดวก กติกาจริงบังคับที่ฐานข้อมูล */
   const canDo: Record<Action, { ok: boolean; why?: string }> = {
@@ -52,10 +53,11 @@ export default function Approve({ scope }: { scope: Scope }) {
       ok: ['DRAFT', 'REJECTED'].includes(status) && blockers === 0,
       why: blockers ? `ยังมีปัญหาระดับบล็อก ${blockers} รายการ` : 'รอบนี้ไม่ได้อยู่สถานะที่ส่งตรวจได้',
     },
+    // HR ทำได้ครบทุกขั้นจนจบรอบ (ส่งตรวจ → อนุมัติ → บันทึกจ่าย) ด้วยบัญชีเดียว
     APPROVE: {
-      ok: status === 'SUBMITTED' && can.approve(role) && p?.submitted_by !== me,
+      ok: status === 'SUBMITTED' && can.approve(role) && (hrAll || p?.submitted_by !== me),
       why: !can.approve(role) ? 'เฉพาะฝ่าย HR'
-        : p?.submitted_by === me ? 'ผู้อนุมัติต้องเป็นคนละบัญชีกับผู้จัดทำ'
+        : (!hrAll && p?.submitted_by === me) ? 'ผู้อนุมัติต้องเป็นคนละบัญชีกับผู้จัดทำ'
           : 'ต้องอยู่สถานะส่งตรวจแล้ว',
     },
     REJECT: {
@@ -63,8 +65,8 @@ export default function Approve({ scope }: { scope: Scope }) {
       why: !can.approve(role) ? 'เฉพาะฝ่าย HR' : 'ตีกลับได้เฉพาะรอบที่ส่งตรวจแล้ว',
     },
     PAID: {
-      ok: status === 'APPROVED' && can.review(role),
-      why: status !== 'APPROVED' ? 'ต้องอนุมัติก่อน' : 'เฉพาะฝ่ายบัญชี',
+      ok: status === 'APPROVED' && (can.review(role) || hrAll),
+      why: status !== 'APPROVED' ? 'ต้องอนุมัติก่อน' : 'เฉพาะฝ่ายบัญชีหรือฝ่ายบุคคล',
     },
   };
 
@@ -149,8 +151,8 @@ export default function Approve({ scope }: { scope: Scope }) {
               ))}
             </div>
             <p className="muted" style={{ marginBottom: 0 }}>
-              ระบบบังคับว่าผู้จัดทำและผู้อนุมัติ (ฝ่าย HR) ต้องเป็นคนละบัญชี — ตรวจที่ฐานข้อมูลทุกครั้ง
-              ไม่ใช่แค่ซ่อนปุ่ม · เมื่ออนุมัติแล้วยอดถูกล็อกเป็น snapshot แก้ไม่ได้อีก
+              ฝ่าย HR ทำได้ครบทุกขั้นจนจบรอบ (ส่งตรวจ → อนุมัติ → บันทึกจ่าย) · ทุกขั้นบันทึกชื่อผู้กดและเวลาไว้ในประวัติ
+              · เมื่ออนุมัติแล้วยอดถูกล็อกเป็น snapshot แก้ไม่ได้อีก
             </p>
           </Card>
 

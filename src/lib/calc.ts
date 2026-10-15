@@ -360,43 +360,38 @@ export function signStatus(signs: SignRow[] | null | undefined, licNo: string, s
   };
 }
 
-/* ------------------- กฎปัดเศษ สาย/ออกก่อน/OT ≤15 นาที ------------------
- * ประกาศ HRM-098/2569 ข้อ 4.4 — ใช้เฉพาะเวรปกติ (kind='SHIFT')
- * ตั้งแต่วันที่มีผลเท่านั้น เวรก่อนหน้าคิดแบบเดิม (เวลาจริงล้วน)
- *  - สาย/ออกก่อน/OT "เดี่ยว ๆ" ≤15 นาที → ไม่คิด · >15 นาที → คิดเต็มตั้งแต่นาทีแรก
- *  - สาย + OT วันเดียวกัน → หักลบตามเวลาจริง ไม่ใช้เกณฑ์ปัด
- *  - มาก่อนเวลามาตรฐานไม่ได้เครดิตเพิ่ม
+/* ------------------------- ชั่วโมงที่ใช้คิดค่าเวร -------------------------
+ * นโยบายตั้งแต่ ต.ค. 2569 (ตามที่ HR ยืนยัน): **ไม่หักชั่วโมงการทำงานแพทย์**
+ *  - เวรปกติ (SHIFT): ได้เต็มเวลามาตรฐานเสมอ (SCHED_START–SCHED_END เช่น 12:00–20:00 = 8 ชม.)
+ *      · มาสาย / ออกก่อน / เวลาพัก → ไม่หัก
+ *      · อยู่เกินเวลา (OT) > GRACE_MIN นาที → จ่ายเพิ่มตามจริง · ≤ GRACE_MIN ไม่คิด
+ *      · มาก่อนเวลามาตรฐานไม่ได้เครดิตเพิ่ม
+ *  - เวรประเภทอื่น (ข้ามคืน / ประชุม / KOL): คิดตามเวลาเข้า–ออกจริง ไม่หักเวลาพัก
+ * ไฟล์ Excel ที่ส่งออกใช้ชั่วโมงชุดเดียวกันนี้ จึงตรงกับหน้าเว็บทุกบรรทัด
  * ------------------------------------------------------------------- */
 export function graceAdjust(
-  ti: number, to: number, breakMin: number, kindStr: string, dateIso: string, ctx: Partial<CalcCtx>,
+  ti: number, to: number, breakMin: number, kindStr: string, _dateIso: string, ctx: Partial<CalcCtx>,
 ): { dur: number; note: string } {
-  const rawDur = Math.max(0, to - ti - breakMin);
-  if (kindStr !== 'SHIFT') return { dur: rawDur, note: '' };
-  if (!ctx || cellStr(ctx.graceEnable).toUpperCase() !== 'Y') return { dur: rawDur, note: '' };
-  if (!ctx.graceEffDate || dateIso < ctx.graceEffDate) return { dur: rawDur, note: '' };
+  const actual = Math.max(0, to - ti);                 // ไม่หักเวลาพัก
+  const brkNote = breakMin > 0 ? `พัก ${breakMin} น. (ไม่หัก)` : '';
+  if (kindStr !== 'SHIFT') return { dur: actual, note: brkNote };
 
-  const schedStart = toMinutes(ctx.schedStart), schedEnd = toMinutes(ctx.schedEnd);
-  if (schedStart === null || schedEnd === null || schedEnd <= schedStart) return { dur: rawDur, note: '' };
-  const grace = num(ctx.graceMin);
+  const schedStart = toMinutes(ctx?.schedStart), schedEnd = toMinutes(ctx?.schedEnd);
+  if (schedStart === null || schedEnd === null || schedEnd <= schedStart) return { dur: actual, note: brkNote };
+  const grace = num(ctx?.graceMin);
   const stdDur = schedEnd - schedStart;
 
   const lateMin = Math.max(0, ti - schedStart);
   const earlyOut = Math.max(0, schedEnd - to);
   const otMin = Math.max(0, to - schedEnd);
-
-  if (lateMin > 0 && otMin > 0) {
-    return { dur: rawDur, note: 'สาย ' + lateMin + ' น. / OT ' + otMin + ' น. (หักลบตามเวลาจริง)' };
-  }
-
-  const effLate = lateMin <= grace ? 0 : lateMin;
-  const effEarly = earlyOut <= grace ? 0 : earlyOut;
-  const effOT = otMin <= grace ? 0 : otMin;
-  const dur = Math.max(0, stdDur - effLate - effEarly + effOT - breakMin);
+  const effOT = otMin > grace ? otMin : 0;
+  const dur = stdDur + effOT;
 
   const notes: string[] = [];
-  if (lateMin > 0) notes.push(effLate ? ('สาย หัก ' + effLate + ' น.') : ('สาย ' + lateMin + ' น. (≤' + grace + ' น. ไม่คิด)'));
-  if (earlyOut > 0) notes.push(effEarly ? ('ออกก่อน หัก ' + effEarly + ' น.') : ('ออกก่อน ' + earlyOut + ' น. (≤' + grace + ' น. ไม่คิด)'));
-  if (otMin > 0) notes.push(effOT ? ('OT จ่าย ' + effOT + ' น.') : ('OT ' + otMin + ' น. (≤' + grace + ' น. ไม่คิด)'));
+  if (lateMin > 0) notes.push(`สาย ${lateMin} น. (ไม่หัก)`);
+  if (earlyOut > 0) notes.push(`ออกก่อน ${earlyOut} น. (ไม่หัก)`);
+  if (brkNote) notes.push(brkNote);
+  if (otMin > 0) notes.push(effOT ? `OT จ่าย ${effOT} น.` : `OT ${otMin} น. (≤${grace} น. ไม่คิด)`);
   return { dur, note: notes.join(' · ') };
 }
 

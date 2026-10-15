@@ -307,6 +307,10 @@ function buildDoctorSheet(ws: Worksheet, L: CalcLine) {
 
     if (item.t === 'S') {
       const d = item.r;
+      // ชั่วโมงที่ใช้จ่ายจริง = ค่าจากเครื่องคำนวณ (ไม่หักพัก/สาย/ออกก่อน) — ไม่คำนวณใหม่จากเวลาเข้า-ออก
+      // เพื่อให้ไฟล์ Excel ตรงกับหน้าเว็บทุกบรรทัด
+      ws.getCell(r, 4).value = num(d.hrs);
+      ws.getCell(r, 5).value = num(d.mins);
       ws.getCell(r, 1).value = d.dateTh || '';
       if (d.timeIn) ws.getCell(r, 2).value = hhmmToFrac(d.timeIn);
       // เวรข้ามคืน: เวลาออกบวก 1 วัน เพื่อให้ HOUR/MINUTE ยังถูก (รูปแบบ h:mm แสดงเฉพาะเวลา)
