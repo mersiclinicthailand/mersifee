@@ -134,6 +134,30 @@ export interface RosterMonth {
   /** เลข ว. → ชื่อเต็ม (เฉพาะคนที่จับคู่ทะเบียนได้) */
   names: Record<string, string>;
 }
+/* ------------------------------ ตารางพยาบาล ------------------------------ */
+export interface NurseRow {
+  branch: string; workDate: string;
+  /** ชื่อที่แสดงในตาราง เช่น "พว.ฟิล์ม" */
+  label: string;
+  /** เลขใบประกอบ (ว่าง = ยังจับคู่ทะเบียนพยาบาลไม่ได้) */
+  licNo: string;
+  amGroup: string; note: string;
+}
+export interface Nurse {
+  licNo: string; nick: string; fullName: string;
+  /** รหัสพนักงาน HumanSoft เช่น RM690901 — ต้องมีจึงจะนำเข้า HumanSoft ได้ */
+  hsCode: string;
+  homeBranch: string; dept: string; position: string; phone: string; active: boolean;
+}
+export interface NurseMonth { ym: string; rows: NurseRow[]; nurses: Nurse[] }
+export interface NurseImportResult {
+  ym: string; saved: number; removed: number; matched: number;
+  /** พยาบาลที่ขึ้นทะเบียนให้อัตโนมัติจากเลขใบประกอบในไฟล์ */
+  registered: number;
+  unmatched: { name: string; count: number }[];
+  badBranch: { code: string; count: number }[];
+}
+
 export interface RosterImportResult {
   ym: string; saved: number; removed: number; matched: number; pooled: number;
   /** เวรที่ยกเลิกแล้วไม่มีคนลงแทน */
@@ -319,6 +343,41 @@ export const api = {
   async rosterImport(ym: string, rows: unknown[]) {
     const r = await rpc<RosterImportResult>('fee_roster_import', { p_ym: ym, p_rows: rows });
     dropCache('roster:'); dropCache('todo');
+    return r;
+  },
+
+  /* ------------------------------ ตารางพยาบาล ------------------------------
+   * แผนเวรพยาบาลรายเดือน — ไม่เกี่ยวกับการคำนวณค่าตอบแทน ใช้ดู/แก้ และส่งออกเข้า HumanSoft
+   */
+  nurseRoster: (ym: string) => cached(`nurse:${ym}`, () => rpc<NurseMonth>('fee_nurse_roster_get', { p_ym: ym })),
+
+  async nurseImport(ym: string, rows: unknown[]) {
+    const r = await rpc<NurseImportResult>('fee_nurse_roster_import', { p_ym: ym, p_rows: rows });
+    dropCache('nurse:');
+    return r;
+  },
+
+  /** เพิ่ม/แก้/ลบ เวรทีละช่อง — ไม่ส่งทั้ง licNo และ label = ลบ */
+  async nurseSet(branch: string, workDate: string, licNo?: string, label?: string) {
+    const r = await rpc<{ cleared: boolean; ym: string }>('fee_nurse_roster_set', {
+      p_branch: branch, p_date: workDate, p_lic: licNo || null, p_label: label || null,
+    });
+    dropCache('nurse:');
+    return r;
+  },
+
+  /** สลับพยาบาลระหว่าง 2 ช่อง (ช่องหนึ่งว่าง = ย้ายเวร) */
+  async nurseSwap(a: { branch: string; date: string }, b: { branch: string; date: string }) {
+    const r = await rpc<{ ok: boolean; a: string; b: string }>('fee_nurse_roster_swap', {
+      p_branch_a: a.branch, p_date_a: a.date, p_branch_b: b.branch, p_date_b: b.date,
+    });
+    dropCache('nurse:');
+    return r;
+  },
+
+  async nurseSave(n: Partial<Nurse> & { licNo: string }) {
+    const r = await rpc<{ ok: boolean }>('fee_nurse_save', { p: n });
+    dropCache('nurse:');
     return r;
   },
 

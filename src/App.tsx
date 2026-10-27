@@ -10,6 +10,7 @@ import Login from './pages/Login';
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Import    = lazy(() => import('./pages/Import'));
 const Roster    = lazy(() => import('./pages/Roster'));
+const NurseRoster = lazy(() => import('./pages/NurseRoster'));
 const Shifts    = lazy(() => import('./pages/Shifts'));
 const Clock     = lazy(() => import('./pages/Clock'));
 const Calc      = lazy(() => import('./pages/Calc'));
@@ -118,6 +119,7 @@ export default function App() {
             <Route path="/"          element={<Dashboard scope={scope} />} />
             <Route path="/import"    element={guard('/import', <Import scope={scope} />)} />
             <Route path="/roster"    element={guard('/roster', <Roster scope={scope} />)} />
+            <Route path="/nurse"     element={guard('/nurse', <NurseRoster scope={scope} />)} />
             <Route path="/shifts"    element={guard('/shifts', <Shifts scope={scope} />)} />
             <Route path="/clock"     element={guard('/clock', <Clock scope={scope} />)} />
             <Route path="/calc"      element={guard('/calc', <Calc scope={scope} />)} />

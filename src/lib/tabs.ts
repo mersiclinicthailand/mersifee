@@ -23,6 +23,8 @@ export const TABS: TabDef[] = [
   // HR/บัญชีนำเข้าทั้งเดือนเพื่อตรวจทาน · พนักงานสาขานำเข้ารายวันที่หน้า "ลงเวลา" แทน
   { to: '/import',    label: 'นำเข้าข้อมูล', show: (r) => ['admin', 'hr', 'acct', 'it'].includes(r) },
   { to: '/roster',    label: 'ตารางแพทย์' },
+  // ตารางพยาบาล — ไม่เกี่ยวกับค่าตอบแทน ใช้ดู/แก้เวร และส่งออกเข้า HumanSoft
+  { to: '/nurse',     label: 'ตารางพยาบาล' },
   { to: '/clock',     label: 'ลงเวลา' },
   { to: '/shifts',    label: 'ใบเวรแพทย์' },
   { to: '/calc',      label: 'คำนวณ' },

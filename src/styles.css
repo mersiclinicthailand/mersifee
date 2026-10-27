@@ -294,3 +294,6 @@ table th.on { background: var(--sage-lt); color: var(--sage-dk); }
 .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
 .chips button.on { background: var(--sage-dk); color: #fff; border-color: var(--sage-dk); }
 .field.need input, .field.need textarea { border-color: var(--bad); background: var(--bad-bg); }
+
+/* ตารางพยาบาล — ช่องที่เลือกไว้ในโหมดสลับเวร */
+.cal .cell.sel, td.sel { outline: 2px dashed var(--sage-dk); outline-offset: -2px; background: var(--sage-lt); }

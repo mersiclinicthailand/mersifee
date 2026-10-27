@@ -430,6 +430,150 @@ export async function parseRosterFile(file: File): Promise<RosterParsed> {
   };
 }
 
+/* ------------------------- ตารางเวรพยาบาล (mersi_ตารางเวรพยาบาล_YYYY-MM.xlsx) -------------------------
+ * โครงไฟล์เหมือนตารางแพทย์: ชีต "ข้อมูลรวม" (วันที่ · กลุ่มดูแล · รหัสสาขา · ชื่อเล่นพยาบาล · เบอร์ติดต่อ ·
+ * เลขใบประกอบ · สถานะ · หมายเหตุ) และชีตปฏิทิน "ตารางเวรพยาบาล" ที่ช่องเขียน "พว.ฟิล์ม\n6711351591"
+ * อ่านชีตข้อมูลรวมก่อนเสมอ ถ้าไม่มีจึงอ่านจากชีตปฏิทิน
+ * --------------------------------------------------------------------------------*/
+export interface NurseParsedRow {
+  workDate: string; branch: string; label: string; licNo: string;
+  amGroup: string; status: string; note: string; phone: string;
+}
+export interface NurseParsed {
+  ym: string;
+  cols: { code: string; label: string; am: string }[];
+  days: number;
+  rows: NurseParsedRow[];
+  source: 'SUMMARY' | 'GRID';
+  withLic: number;
+  nurses: number;
+}
+
+/** "ฟิล์ม" → "พว.ฟิล์ม" ให้หน้าตาเหมือนช่องในชีตปฏิทิน */
+const nurseLabelOf = (nick: string): string => {
+  const t = nick.trim();
+  if (!t) return '';
+  return /^(พว\.|พย\.|พยาบาล)/.test(t) ? t : `พว.${t}`;
+};
+
+export async function parseNurseRosterFile(file: File): Promise<NurseParsed> {
+  const { XLSX, wb } = await readWorkbook(file);
+  const sumName = wb.SheetNames.find((n) => /ข้อมูลรวม/.test(n));
+  const gridName = wb.SheetNames.find((n) => /ตารางเวร/.test(n)) || wb.SheetNames[0];
+  const aoaOf = (n: string) => XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets[n], {
+    header: 1, raw: true, defval: null, blankrows: true,
+  });
+
+  const grid = wb.Sheets[gridName] ? aoaOf(gridName) : [];
+  const title = cellText((grid[0] || [])[0]);
+  let ym = '';
+  for (let i = 0; i < 12; i++) {
+    if (title.includes(TH_MONTHS_FULL[i])) {
+      const y = (title.match(/(\d{4})/) || [])[1];
+      if (y) ym = `${Number(y) - 543}-${pad2(i + 1)}`;
+      break;
+    }
+  }
+  const amRow = (grid[1] || []) as unknown[];
+  const headRow = (grid[2] || []) as unknown[];
+  const cols: { c: number; code: string; label: string; am: string }[] = [];
+  let curAm = '';
+  for (let c = 1; c < headRow.length; c++) {
+    const h = cellText(headRow[c]);
+    if (!h) continue;
+    if (cellText(amRow[c])) curAm = cellText(amRow[c]);
+    const raw = h.split(/[\n\r]/)[0].trim().toUpperCase();
+    cols.push({ c, code: ROSTER_BRANCH_FIX[raw] || raw, label: h.replace(/[\n\r]+/g, ' ').trim(), am: curAm });
+  }
+
+  const rows: NurseParsedRow[] = [];
+  const days = new Set<string>();
+  let source: NurseParsed['source'] = 'GRID';
+
+  if (sumName) {
+    source = 'SUMMARY';
+    const aoa = aoaOf(sumName);
+    const head = (aoa[0] || []) as unknown[];
+    const iDate = headIndex(head, 'วันที่');
+    const iAm = headIndex(head, 'กลุ่มดูแล', 'กลุ่ม');
+    const iCode = headIndex(head, 'รหัสสาขา', 'สาขา');
+    const iNick = headIndex(head, 'ชื่อเล่นพยาบาล', 'ชื่อพยาบาล', 'ชื่อเล่น');
+    const iTel = headIndex(head, 'เบอร์ติดต่อ', 'เบอร์โทร');
+    const iLic = headIndex(head, 'เลขใบประกอบ', 'เลขใบประกอบวิชาชีพ');
+    const iSt = headIndex(head, 'สถานะ');
+    const iNote = headIndex(head, 'หมายเหตุ');
+    if (iDate < 0 || iCode < 0 || iNick < 0) {
+      throw new Error('ชีต "ข้อมูลรวม" ต้องมีคอลัมน์ วันที่ · รหัสสาขา · ชื่อเล่นพยาบาล');
+    }
+    const ymCount = new Map<string, number>();
+    for (let r = 1; r < aoa.length; r++) {
+      const a = (aoa[r] || []) as unknown[];
+      const iso = toIsoDate(a[iDate]);
+      const code0 = cellText(a[iCode]).trim().toUpperCase();
+      const nick = cellText(a[iNick]).trim();
+      if (!iso || !code0 || !nick || isOffCell(nick)) continue;
+      const branch = ROSTER_BRANCH_FIX[code0] || code0;
+      ymCount.set(iso.substring(0, 7), (ymCount.get(iso.substring(0, 7)) || 0) + 1);
+      days.add(iso);
+      rows.push({
+        workDate: iso,
+        branch,
+        label: nurseLabelOf(nick),
+        licNo: iLic >= 0 ? licDigits(a[iLic]) : '',
+        amGroup: iAm >= 0 ? cellText(a[iAm]).trim() : (cols.find((c) => c.code === branch)?.am || ''),
+        status: iSt >= 0 ? (cellText(a[iSt]).trim() || 'ยืนยัน') : 'ยืนยัน',
+        note: iNote >= 0 ? cellText(a[iNote]).trim() : '',
+        phone: iTel >= 0 ? cellText(a[iTel]).trim() : '',
+      });
+    }
+    if (!ym) {
+      let best = ''; let n = 0;
+      ymCount.forEach((v, k) => { if (v > n) { n = v; best = k; } });
+      ym = best;
+    }
+    if (!ym) throw new Error('อ่านเดือนจากไฟล์ไม่ได้ — ตรวจคอลัมน์ "วันที่" ในชีต "ข้อมูลรวม"');
+    for (let i = rows.length - 1; i >= 0; i--) {
+      if (rows[i].workDate.substring(0, 7) !== ym) rows.splice(i, 1);
+    }
+  } else {
+    if (!ym) throw new Error('อ่านเดือนจากหัวตารางไม่ได้ — ช่อง A1 ต้องเป็นเช่น "ตารางเวรพยาบาล พฤศจิกายน 2569"');
+    if (!cols.length) throw new Error('ไม่พบหัวสาขาในแถวที่ 3 ของไฟล์');
+    for (let r = 3; r < grid.length; r++) {
+      const a = (grid[r] || []) as unknown[];
+      const m = cellText(a[0]).match(/\d+/);
+      const d = m ? Number(m[0]) : 0;
+      if (!d || d > 31) continue;
+      const iso = `${ym}-${pad2(d)}`;
+      days.add(iso);
+      cols.forEach((col) => {
+        const parts = cellText(a[col.c]).split(/[\n\r]+/).map((t) => t.trim()).filter(Boolean);
+        const label = parts[0] || '';
+        if (isOffCell(label)) return;
+        const rest = parts.slice(1);
+        const isLic = (t: string) => /^\d{6,}$/.test(t.replace(/\s/g, ''));
+        rows.push({
+          workDate: iso, branch: col.code, label: nurseLabelOf(label),
+          licNo: licDigits(rest.find(isLic) || ''), amGroup: col.am, status: 'ยืนยัน',
+          note: rest.filter((t) => !isLic(t)).join(' '), phone: '',
+        });
+      });
+    }
+  }
+
+  if (!rows.length) {
+    throw new Error('ไม่พบเวรในไฟล์ — ตรวจว่ามีชีต "ข้อมูลรวม" หรือชีตตารางเวรที่วันที่เริ่มแถว 4');
+  }
+  return {
+    ym,
+    cols: cols.map(({ code, label, am }) => ({ code, label, am })),
+    days: days.size,
+    rows,
+    source,
+    withLic: rows.filter((r) => r.licNo).length,
+    nurses: new Set(rows.map((r) => r.licNo || r.label)).size,
+  };
+}
+
 /* ------------------------- ทะเบียนแพทย์ (Data หมอ Update) -------------------------
  * ไฟล์ master รายชื่อแพทย์ของ HR — หัวตาราง: การันตีหมอ · วันเกิด · เลขว. · เลขบัตรประชาชน ·
  * ชื่อ-นามสกุล · ชื่อเล่น · เบอร์ติดต่อ · ที่อยู่ · ธนาคาร · เลขบัญชี · สาขา · Mail · หมายเหตุ
